@@ -1,0 +1,25 @@
+[package]
+name = "rs1090-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Command-line tool for the rs1090 Mode S / ADS-B decoder."
+
+[[bin]]
+name = "rs1090"
+path = "src/main.rs"
+
+[dependencies]
+rs1090 = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

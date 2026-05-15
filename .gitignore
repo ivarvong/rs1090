@@ -1,0 +1,12 @@
+target/
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+*.iq
+!corpus/**/*.iq
+.idea/
+.vscode/
+*.swp
+perf.data*
+flamegraph.svg
+dhat-heap.json
