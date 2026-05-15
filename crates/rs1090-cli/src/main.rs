@@ -12,6 +12,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use rs1090::frame::{Frame, FrameDetector};
+use rs1090::message::{
+    self, Altitude, Message, SquitterPayload, Velocity, VelocityKind,
+};
 use rs1090::source::{IqFileSource, SampleSource};
 use rs1090::Iq;
 
@@ -99,9 +102,7 @@ fn run_replay(args: &ReplayArgs) -> Result<()> {
 
 fn print_frame<W: Write>(out: &mut W, frame: &Frame) -> io::Result<()> {
     // One-line, space-separated format: DF code, hex payload, CRC outcome,
-    // aggregate confidence. Subject to change once the message decoder
-    // produces richer output; for now this is enough to eyeball the M1
-    // pipeline against a known capture.
+    // aggregate confidence, then a short decoded summary.
     write!(out, "DF{:<2} ", frame.downlink_format().raw_value())?;
     for b in frame.bytes() {
         write!(out, "{b:02X}")?;
@@ -112,6 +113,73 @@ fn print_frame<W: Write>(out: &mut W, frame: &Frame) -> io::Result<()> {
         rs1090::crc::CrcOutcome::Corrected { bit } => write!(out, "corrected:{bit:<3} ")?,
         rs1090::crc::CrcOutcome::Failed => write!(out, "failed      ")?,
     }
-    writeln!(out, "conf={}", frame.confidence())?;
+    write!(out, "conf={:<3} ", frame.confidence())?;
+
+    // Decoded summary. Errors in the decoder are non-fatal; print the raw
+    // tag and move on.
+    match message::decode(frame) {
+        Ok(msg) => print_message_summary(out, &msg)?,
+        Err(e) => write!(out, "decode-err:{e:?}")?,
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
+fn print_message_summary<W: Write>(out: &mut W, msg: &Message) -> io::Result<()> {
+    match msg {
+        Message::ExtendedSquitter(es) => {
+            write!(out, "ICAO={} ", es.icao)?;
+            match &es.payload {
+                SquitterPayload::Identification(id) => {
+                    write!(out, "ident callsign={} cat={}/{}",
+                        id.callsign, id.category_set, id.category)?;
+                }
+                SquitterPayload::AirbornePosition(p) => {
+                    write!(out, "airpos {} cpr-{}({},{})",
+                        fmt_altitude(p.altitude),
+                        if p.cpr.odd { "odd" } else { "even" },
+                        p.cpr.lat_cpr, p.cpr.lon_cpr,
+                    )?;
+                }
+                SquitterPayload::Velocity(v) => print_velocity_summary(out, v)?,
+                SquitterPayload::Raw(_) => write!(out, "tc={:?}", es.type_code)?,
+                _ => write!(out, "tc={:?}(unhandled)", es.type_code)?,
+            }
+        }
+        Message::AllCallReply { icao } => write!(out, "all-call ICAO={icao}")?,
+        Message::SurveillanceReply { df, bytes } => {
+            write!(out, "surv DF{} bytes={}", df.raw_value(), bytes)?;
+        }
+        Message::Other { df } => write!(out, "other DF{}", df.raw_value())?,
+        _ => write!(out, "unhandled")?,
+    }
+    Ok(())
+}
+
+fn fmt_altitude(a: Altitude) -> String {
+    match a {
+        Altitude::BaroFeet(ft) => format!("alt={ft}ft"),
+        Altitude::BaroGillhamFeet(ft) => format!("alt={ft}ft(gillham)"),
+        Altitude::GnssFeet(ft) => format!("alt={ft}ft(gnss)"),
+        Altitude::Unavailable => "alt=n/a".to_string(),
+    }
+}
+
+fn print_velocity_summary<W: Write>(out: &mut W, v: &Velocity) -> io::Result<()> {
+    match &v.kind {
+        VelocityKind::Ground { speed_kt, heading_deg } => {
+            write!(out, "vel gs={speed_kt}kt hdg={heading_deg:.1}°")?;
+        }
+        VelocityKind::Airspeed { speed_kt, heading_deg, magnetic } => {
+            write!(out, "vel ias={speed_kt}kt")?;
+            if let Some(h) = heading_deg {
+                let label = if *magnetic { "mag" } else { "true" };
+                write!(out, " hdg={h:.1}°({label})")?;
+            }
+        }
+    }
+    if let Some(vr) = v.vertical_rate_fpm {
+        write!(out, " vr={vr:+}fpm")?;
+    }
     Ok(())
 }

@@ -38,6 +38,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per detected frame (DF code, hex payload, CRC outcome, aggregate
   confidence). Integration test synthesizes a DF 17 frame on disk and
   verifies the binary's output end-to-end.
+- `cpr` module: CPR airborne position decoder. Global decode from
+  even/odd pair, local decode from a reference position. NL transition
+  table pinned from ICAO Annex 10 Table 2-1 with three cross-checks: a
+  formula sweep across the globe at 0.1° resolution, equator symmetry,
+  and pinned band midpoints. Tests the canonical Sun "1090 MHz Riddle"
+  worked example and round-trips at five geographically diverse points.
+  Local decode's wrong-tile failure mode for distant references is
+  documented as a known limitation (test pinned).
+- `message` module: top-level `decode(&Frame)`. ICAO address type, TC
+  dispatch covering identification (TC 1–4), airborne position (TC 9–18,
+  20–22), and velocity (TC 19, subtypes 1–4). Callsigns decoded into
+  `ArrayString<8>` from the 6-bit ICAO charset. Altitude decoding
+  supports the 25-ft Q-bit baro encoding; Gillham (Mode C) is exposed as
+  a distinct variant for future Gray-code work. Surveillance replies
+  (DF 4/5/16/20/21) surface raw bytes because their address-XOR CRC
+  cannot be validated without an active-aircraft set.
+- CLI now prints a decoded summary per frame: `ICAO=...`, callsign,
+  altitude, CPR fields, velocity in knots/heading.
+
+### Known limitations carried into M3
+
+- DF 11 address recovery from a non-zero CRC syndrome is not yet wired
+  into the frame layer. Clean DF 11 frames work; corrupted ones whose
+  syndrome equals an unknown ICAO are surfaced as `Failed` rather than
+  having their address recovered.
+- Surface position (TC 5–8), aircraft status (TC 28), and operational
+  status (TC 31) are accepted by the dispatcher but emitted as `Raw`;
+  decoding lands in M3 once we have a state tracker to feed reference
+  positions to.
 
 ### Fixed
 

@@ -15,9 +15,11 @@
 #![doc(html_root_url = "https://docs.rs/rs1090")]
 
 pub mod crc;
+pub mod cpr;
 pub mod demod;
 pub mod frame;
 pub mod magnitude;
+pub mod message;
 
 #[cfg(feature = "std")]
 pub mod source;

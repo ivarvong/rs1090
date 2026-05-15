@@ -19,20 +19,37 @@ use rs1090::demod::{synth_bits_as_magnitude, PREAMBLE_HIGH_IDX, PREAMBLE_SAMPLES
 /// API surface.
 const LONG_FRAME_BYTES: usize = 14;
 
-/// Build a synthetic DF 17 frame with a valid CRC.
+/// Build a synthetic DF 17 identification frame carrying callsign
+/// "TEST1234". Lets us assert end-to-end that the CLI invokes the
+/// message decoder and prints the callsign, not just the raw bytes.
 fn synth_df17_frame() -> [u8; LONG_FRAME_BYTES] {
+    // Identification: TC=4, category=0, eight 6-bit codes for "TEST1234".
+    let codes: [u8; 8] = [
+        20, // T
+        5,  // E
+        19, // S
+        20, // T
+        49, // 1
+        50, // 2
+        51, // 3
+        52, // 4
+    ];
+    let mut me = [0u8; 7];
+    me[0] = 4u8 << 3; // TC=4, category=0
+    let mut bits: u64 = 0;
+    for c in codes {
+        bits = (bits << 6) | u64::from(c & 0x3F);
+    }
+    for i in 0..6 {
+        me[1 + i] = ((bits >> (8 * (5 - i))) & 0xFF) as u8;
+    }
+
     let mut data = [0u8; LONG_FRAME_BYTES - 3];
-    data[0] = 17 << 3; // DF 17, capability bits = 0
+    data[0] = (17u8 << 3) | 5; // DF 17, capability = 5
     data[1] = 0x4B;
     data[2] = 0x9C;
     data[3] = 0xA2;
-    data[4] = 0x07;
-    data[5] = 0x58;
-    data[6] = 0x10;
-    data[7] = 0x20;
-    data[8] = 0x30;
-    data[9] = 0x40;
-    data[10] = 0x50;
+    data[4..11].copy_from_slice(&me);
     let crc_val = crc::crc24(&data);
     let mut frame = [0u8; LONG_FRAME_BYTES];
     frame[..LONG_FRAME_BYTES - 3].copy_from_slice(&data);
@@ -138,6 +155,14 @@ fn replay_decodes_synthetic_df17_frame() {
     assert!(
         stdout.contains("clean"),
         "expected clean CRC outcome, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("ICAO=4B9CA2"),
+        "expected ICAO=4B9CA2 in decoded line, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("callsign=TEST1234"),
+        "expected callsign=TEST1234 in decoded line, got:\n{stdout}"
     );
     assert!(
         stderr.contains("1 frames"),
