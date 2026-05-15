@@ -15,6 +15,7 @@
 #![doc(html_root_url = "https://docs.rs/rs1090")]
 
 pub mod crc;
+pub mod demod;
 pub mod magnitude;
 
 /// A complex I/Q sample with signed 8-bit components.

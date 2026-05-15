@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for both short (56-bit) and long (112-bit) frames; tables are verified
   collision-free, which is the structural prerequisite for unambiguous
   correction. Proptest sweeps the roundtrip and single-bit recovery.
+- `demod` module: noise-floor EMA (`NoiseFloor`, shift-based), preamble
+  correlator (`preamble_score`, `preamble_clears_threshold`), and bit slicer
+  with per-bit confidence in `[0, 255]`. Aggregate confidence uses the
+  minimum — one bad bit dominates a frame's correctability. Synthetic-PPM
+  round-trip tests under `test-utils` (also enabled in `#[cfg(test)]`).
 
 ### Fixed
 
