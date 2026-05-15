@@ -12,10 +12,16 @@ description = "Command-line tool for the rs1090 Mode S / ADS-B decoder."
 name = "rs1090"
 path = "src/main.rs"
 
+[features]
+default = ["rtl-sdr"]
+# Enable the live RTL-SDR backend (pulls in rs-rtl + nusb).
+rtl-sdr = ["rs1090/rtl-sdr", "dep:ctrlc"]
+
 [dependencies]
 rs1090 = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+ctrlc = { version = "3", optional = true }
 
 [dev-dependencies]
 # Re-enable the same crate with the `test-utils` feature so integration

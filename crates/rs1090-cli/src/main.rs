@@ -40,6 +40,9 @@ enum Command {
     /// Replay an `.iq` file and print state-tracker events: aircraft
     /// acquisitions, identifications, positions, velocities, losses.
     Track(TrackArgs),
+    /// Stream from a live RTL-SDR dongle and print state-tracker events.
+    #[cfg(feature = "rtl-sdr")]
+    Live(LiveArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -112,11 +115,50 @@ fn parse_latlon(s: &str) -> std::result::Result<LatLon, String> {
     Ok(LatLon { lat_deg, lon_deg })
 }
 
+#[cfg(feature = "rtl-sdr")]
+#[derive(clap::Args, Debug)]
+struct LiveArgs {
+    /// RTL-SDR device index.
+    #[arg(long, default_value_t = 0)]
+    device: usize,
+
+    /// Manual gain in tenths of dB (e.g. 400 = 40 dB). Use --auto-gain for AGC.
+    #[arg(long, default_value_t = 400)]
+    gain_tenth_db: i32,
+
+    /// Use the tuner's AGC instead of manual gain.
+    #[arg(long, conflicts_with = "gain_tenth_db")]
+    auto_gain: bool,
+
+    /// Enable bias-T (phantom power on the antenna port). Off by default.
+    #[arg(long)]
+    bias_t: bool,
+
+    /// Drop frames whose aggregate per-bit confidence is below this value.
+    #[arg(long, default_value_t = 0)]
+    min_confidence: u8,
+
+    /// Receiver reference position for local CPR decode, in `lat,lon`.
+    #[arg(long, value_parser = parse_latlon)]
+    reference: Option<LatLon>,
+
+    /// Stop after this many seconds; if unset, run until Ctrl-C.
+    #[arg(long)]
+    duration_secs: Option<u64>,
+
+    /// Optional file path to also save the raw bias-subtracted `.iq` to
+    /// (for later replay). The same byte format as `replay`/`track` consume.
+    #[arg(long)]
+    record: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Command::Replay(args) => run_replay(args),
         Command::Track(args) => run_track(args),
+        #[cfg(feature = "rtl-sdr")]
+        Command::Live(args) => run_live(args),
     }
 }
 
@@ -369,3 +411,115 @@ fn print_state_event<W: Write>(out: &mut W, event: &StateEvent) -> io::Result<()
     }
     Ok(())
 }
+
+// --- `live` subcommand ------------------------------------------------------
+
+#[cfg(feature = "rtl-sdr")]
+fn run_live(args: &LiveArgs) -> Result<()> {
+    use std::fs::File;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use rs1090::source::RtlSdrSourceBuilder;
+
+    let mut builder = RtlSdrSourceBuilder::new()
+        .device_index(args.device)
+        .bias_t(args.bias_t);
+    if args.auto_gain {
+        builder = builder.auto_gain();
+    } else {
+        builder = builder.gain_tenth_db(args.gain_tenth_db);
+    }
+    let mut source = builder.open().context("opening RTL-SDR device")?;
+    eprintln!(
+        "rs1090: opened RTL-SDR (device {}, {} Hz, {} MS/s)",
+        args.device,
+        source.center_freq(),
+        source.sample_rate(),
+    );
+
+    // Ctrl-C handling: flip an AtomicBool, check it between read() calls.
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        let _ = ctrlc::set_handler(move || {
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
+
+    let mut detector = FrameDetector::new();
+    detector.set_min_confidence(args.min_confidence);
+
+    let mut tracker = StateTracker::new();
+    if let Some(r) = args.reference {
+        tracker.set_reference(r);
+    }
+
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    let mut buf = vec![Iq::default(); 65_536];
+
+    let mut record_file: Option<BufWriter<File>> = if let Some(path) = &args.record {
+        Some(BufWriter::new(
+            File::create(path).with_context(|| format!("creating {}", path.display()))?,
+        ))
+    } else {
+        None
+    };
+
+    let t0 = Instant::now();
+    let mut events_buf: Vec<StateEvent> = Vec::with_capacity(32);
+    let mut total_samples: u64 = 0;
+    let mut total_frames: u64 = 0;
+
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        if let Some(d) = args.duration_secs {
+            if t0.elapsed() >= Duration::from_secs(d) {
+                break;
+            }
+        }
+        let n = source.read(&mut buf).context("reading samples")?;
+        if n == 0 {
+            eprintln!("rs1090: source closed unexpectedly");
+            break;
+        }
+        total_samples += n as u64;
+
+        if let Some(rec) = &mut record_file {
+            // Bias-subtracted signed bytes interleaved, matching IqFileSource.
+            for s in &buf[..n] {
+                rec.write_all(&s.i.to_ne_bytes())?;
+                rec.write_all(&s.q.to_ne_bytes())?;
+            }
+        }
+
+        let now = Instant::now();
+        detector.process(&buf[..n], |frame| {
+            total_frames += 1;
+            tracker.ingest(frame, now, &mut events_buf);
+            for event in events_buf.drain(..) {
+                let _ = print_state_event(&mut out, &event);
+            }
+        });
+        out.flush().ok();
+    }
+
+    out.flush().ok();
+    if let Some(mut rec) = record_file {
+        rec.flush().ok();
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "rs1090: {} samples, {} frames, {} aircraft tracked, {:.2}s elapsed",
+        total_samples,
+        total_frames,
+        tracker.len(),
+        elapsed,
+    );
+    Ok(())
+}
+
+

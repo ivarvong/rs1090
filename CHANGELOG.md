@@ -94,6 +94,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status (TC 31) are still surfaced as `Raw` payloads; decoding lands
   in a future milestone alongside Beast/SBS network output formats.
 
+## M4: live RTL-SDR backend
+
+### Added
+
+- `rtl-sdr` feature on the `rs1090` library: a `SampleSource`
+  implementation backed by the `rs-rtl` crate (pure-Rust nusb driver,
+  no libusb dependency). `RtlSdrSourceBuilder` exposes device index,
+  sample rate, center freq, manual/auto gain, and bias-T.
+- `rs1090 live` subcommand: open the dongle, stream samples directly
+  through the detector and tracker, print state events as they happen.
+  `--record` simultaneously saves the bias-subtracted IQ stream to disk
+  for later replay; `--duration-secs` bounds the session; Ctrl-C
+  shuts down cleanly. First-class real-time decoder, no python
+  bias-subtraction pipeline required.
+
 ### Fixed
 
 - DESIGN.md previously cited the 3.96% error bound, which applies to the

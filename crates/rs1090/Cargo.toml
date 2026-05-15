@@ -16,10 +16,13 @@ default = ["std"]
 std = []
 # Synthetic frame generation, only useful for tests and demos.
 test-utils = ["std"]
+# RTL-SDR live SampleSource. Pulls in rs-rtl + nusb.
+rtl-sdr = ["std", "dep:rs-rtl"]
 
 [dependencies]
 arrayvec = { workspace = true }
 thiserror = { workspace = true, optional = true }
+rs-rtl = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
