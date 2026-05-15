@@ -3,7 +3,11 @@ target/
 Cargo.lock.bak
 .DS_Store
 *.iq
-!corpus/**/*.iq
+# Note: `corpus/` is gitignored. Live captures are too large and too
+# non-deterministic to commit. When we identify a known-good slice that
+# exercises a specific decoder path, extract a minimal fixture and
+# commit it under `crates/rs1090/tests/fixtures/` instead.
+corpus/
 .idea/
 .vscode/
 *.swp
