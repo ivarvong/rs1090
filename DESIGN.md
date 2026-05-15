@@ -81,7 +81,7 @@ Pi Zero W (BCM2835, ARMv6, 1 GHz):
 | L2 cache                    | 128 KB shared                          |
 | SIMD                        | None (no NEON on ARMv6)                |
 
-Five-hundred cycles per sample is tight but feasible. The magnitude step is the dominant cost. We use the **alpha-max-plus-beta-min** approximation: `mag ≈ max(|I|,|Q|) + 0.5·min(|I|,|Q|)`. Max error 3.96%, no multiply, no sqrt, branchless on ARMv6. We will *also* maintain a 64KB precomputed magnitude lookup table keyed on the `(I, Q)` byte pair (since RTL-SDR samples are 8-bit) — this fits in L2 and turns the magnitude step into a single load. We will benchmark both and pick.
+Five-hundred cycles per sample is tight but feasible. The magnitude step is the dominant cost. We use the **alpha-max-plus-beta-min** approximation: `mag ≈ max(|I|,|Q|) + 0.5·min(|I|,|Q|)`. No multiply, no sqrt, branchless on ARMv6. Continuous-math peak error ~11.8% at `|min|/|max| = 0.5`; the classic 3.96% figure applies to the multiplicative variant `α = 15/16, β = 15/32`, which costs a multiply we'd rather avoid on ARMv6. The approximation is used only to feed an adaptive threshold downstream, so the relative bias doesn't bleed into bit decisions. We *also* maintain a 128KB precomputed magnitude lookup table keyed on the `(I, Q)` byte pair (since RTL-SDR samples are 8-bit) — this fits in L2 on x86_64 and turns the magnitude step into a single load. We benchmark both and pick per platform.
 
 The preamble correlator and bit slicer operate on the magnitude stream at 2 samples/bit. Their per-sample cost is well under the magnitude step's.
 
@@ -422,7 +422,7 @@ Standard. Every module. Run on `cargo test` with no features beyond `default`.
 - CRC: for any random 88-bit payload, CRC-then-verify yields zero.
 - CRC: flipping any single bit causes failure or successful 1-bit correction.
 - CPR: encode-then-decode round-trips within latitude/longitude quantization bounds.
-- Magnitude: alpha-max-beta-min within 3.96% of true magnitude over the full input space.
+- Magnitude: alpha-max-beta-min within ~11.8% of true magnitude where the minor component is above the integer-truncation regime (|min| ≥ 4); LUT exact to rounding.
 - Bit slicer: synthetic PPM with known bits decodes back to those bits at SNR ≥ 6 dB.
 
 ### 13.3 Vector Tests
