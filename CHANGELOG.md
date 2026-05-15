@@ -109,6 +109,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shuts down cleanly. First-class real-time decoder, no python
   bias-subtraction pipeline required.
 
+## M5: HTTP / Server-Sent Events server
+
+### Added
+
+- New crate `rs1090-serve`: an HTTP server that exposes the decoded
+  stream over Server-Sent Events. Sync decoder thread owns the SDR;
+  tokio runtime hosts `axum` and the SSE fan-out via
+  `tokio::sync::broadcast`. The library proper stays tokio-free.
+- Endpoints (per DESIGN.md §12):
+  - `GET /healthz`
+  - `GET /aircraft` — JSON snapshot of all currently-tracked aircraft.
+  - `GET /aircraft/:icao` — JSON for a single ICAO.
+  - `GET /stream` — `text/event-stream` of live events with
+    `event:`/`id:`/`data:` lines. Heartbeats every 15s.
+  - Stream filters: `?type=position,velocity` and `?icao=AB9B13,A1D49E`
+    compose. Multiple values are comma-separated.
+- JSON schema per DESIGN.md §12.2: SI units throughout (m/s, degrees),
+  RFC 3339 UTC timestamps, versioned (`"v": 1`), `id` field on every
+  event so clients can resume via `Last-Event-ID` (honoured by the
+  server; full ring-buffer replay is deferred until a real reconnect
+  pattern emerges).
+- Two source modes: `file` (replay an `.iq` capture, with optional
+  `--realtime` pacing for demos) and `live` (open the RTL-SDR dongle,
+  behind the `rtl-sdr` feature flag).
+- Integration test that synthesizes a DF 17 frame on disk, spawns the
+  binary, polls `/aircraft` until the decoder catches up, and asserts
+  the ICAO and callsign appear in the JSON. Uses a hand-rolled
+  blocking HTTP client to avoid pulling in an HTTP-client dep.
+- Sanity: 99 tests passing across the workspace (90 lib + 1 CLI
+  integration + 7 serve unit + 1 serve integration); clippy clean
+  under `-D warnings` with the pedantic group enabled.
+
+### M5 deferred work
+
+- Full Last-Event-ID replay (ring buffer of recent events). The
+  protocol is honoured — clients sending `Last-Event-ID` skip past
+  earlier ids in the live stream — but we don't yet maintain a
+  bounded history for true gap-filling reconnects. The atomic id
+  counter is already in place; adding the ring buffer is a self-
+  contained change.
+- Backpressure: `tokio::sync::broadcast` lags rather than drops on
+  slow consumers (subscribers see `RecvError::Lagged`); DESIGN.md
+  calls for explicit `event: dropped` notifications and per-client
+  queue metrics, which are not yet wired up.
+- Auth, Prometheus `/metrics`, bbox filter, CORS configuration. All
+  trivial individually; deferred until the use case is concrete.
+
 ### Fixed
 
 - DESIGN.md previously cited the 3.96% error bound, which applies to the
