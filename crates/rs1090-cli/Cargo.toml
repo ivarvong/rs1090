@@ -17,6 +17,13 @@ rs1090 = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 
+[dev-dependencies]
+# Re-enable the same crate with the `test-utils` feature so integration
+# tests can synthesize known frames without depending on captured `.iq`
+# files in-tree.
+rs1090 = { workspace = true, features = ["test-utils"] }
+tempfile = "3"
+
 [lints.rust]
 unsafe_code = "forbid"
 

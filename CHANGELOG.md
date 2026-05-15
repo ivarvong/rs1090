@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with per-bit confidence in `[0, 255]`. Aggregate confidence uses the
   minimum — one bad bit dominates a frame's correctability. Synthetic-PPM
   round-trip tests under `test-utils` (also enabled in `#[cfg(test)]`).
+- `frame` module: `DownlinkFormat` enum (DFs 0/4/5/11/16/17/18/20/21 plus a
+  `Reserved` catch-all), `Frame` value type, and `FrameDetector` — a
+  streaming detector that takes chunked `Iq` input via a callback. Handles
+  chunk-straddling preambles with a 256-sample carry buffer. End-to-end tests
+  recover synthetic DF 17 frames at high SNR and exercise 1-bit correction
+  through the detector → CRC path.
+- `source` module (std-only): `SampleSource` trait and `IqFileSource` backend
+  reading raw interleaved signed 8-bit I/Q files. Handles short reads and
+  odd-byte EOFs.
+- `rs1090-cli`: `replay` subcommand reads an `.iq` file and prints one line
+  per detected frame (DF code, hex payload, CRC outcome, aggregate
+  confidence). Integration test synthesizes a DF 17 frame on disk and
+  verifies the binary's output end-to-end.
 
 ### Fixed
 

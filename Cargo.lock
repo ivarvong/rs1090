@@ -601,6 +601,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rs1090",
+ "tempfile",
 ]
 
 [[package]]

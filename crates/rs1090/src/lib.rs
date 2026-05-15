@@ -16,7 +16,11 @@
 
 pub mod crc;
 pub mod demod;
+pub mod frame;
 pub mod magnitude;
+
+#[cfg(feature = "std")]
+pub mod source;
 
 /// A complex I/Q sample with signed 8-bit components.
 ///
