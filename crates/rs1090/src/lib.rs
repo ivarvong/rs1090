@@ -23,6 +23,8 @@ pub mod message;
 
 #[cfg(feature = "std")]
 pub mod source;
+#[cfg(feature = "std")]
+pub mod state;
 
 /// A complex I/Q sample with signed 8-bit components.
 ///

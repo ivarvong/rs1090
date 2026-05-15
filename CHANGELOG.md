@@ -57,16 +57,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI now prints a decoded summary per frame: `ICAO=...`, callsign,
   altitude, CPR fields, velocity in knots/heading.
 
-### Known limitations carried into M3
+- `state` module: per-aircraft state tracker keyed by ICAO. Maintains
+  callsign, category, latest position (with even/odd CPR pairing within
+  a 10s window), latest velocity, and per-aircraft CRC counters. LRU
+  eviction at default capacity 4096; stale entries are dropped after
+  5 minutes idle.
+- Address-XOR CRC recovery for DF 0/4/5/16/20/21 surveillance replies:
+  the tracker maintains the active-ICAO set (last 60s by default) and
+  matches each failed-CRC frame's syndrome against `crc24(icao_bytes)`
+  for known aircraft. In our 2-minute live capture this recovers 1272
+  of 1522 address-XOR'd frames (84%), turning ~80% of "failed" frames
+  into useful surveillance data per active aircraft.
+- `FrameDetector` bug fix: the inner sliding-window loop required room
+  for a long (14-byte) frame, missing short DF 0/4/5/11 frames near the
+  tail of any sample buffer. Fixed to require only the minimum
+  short-frame window; long-frame buffer length is still checked once
+  the DF resolves.
+- `rs1090 track` subcommand: replay an `.iq` file through the full
+  pipeline (source → detector → message → tracker) and print one line
+  per state event: `acquire`, `ident`, `pos` (with global/local source
+  tag), `vel`, `lost`, `addr-recover`, `orphan`. `--summary` prints a
+  per-aircraft roll-up at end of file. `--reference lat,lon` enables
+  local CPR decode when no even/odd pair is available.
 
-- DF 11 address recovery from a non-zero CRC syndrome is not yet wired
-  into the frame layer. Clean DF 11 frames work; corrupted ones whose
-  syndrome equals an unknown ICAO are surfaced as `Failed` rather than
-  having their address recovered.
+### M3 known limitations
+
+- CPR latitude-zone-mismatch path is implemented but didn't fire in our
+  2-min capture; will be exercised once a fast-moving target near an NL
+  boundary appears.
+- Address-XOR CRC recovery uses linear scan over the active set on each
+  failed frame. With ~10 active aircraft this is sub-microsecond; with
+  thousands (e.g. an airport-camera-grade receiver) it becomes O(n) per
+  frame and would want a syndrome→ICAO precomputed map. Optimization
+  deferred until we have a use case for it.
 - Surface position (TC 5–8), aircraft status (TC 28), and operational
-  status (TC 31) are accepted by the dispatcher but emitted as `Raw`;
-  decoding lands in M3 once we have a state tracker to feed reference
-  positions to.
+  status (TC 31) are still surfaced as `Raw` payloads; decoding lands
+  in a future milestone alongside Beast/SBS network output formats.
 
 ### Fixed
 

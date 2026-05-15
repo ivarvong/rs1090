@@ -226,12 +226,15 @@ const CARRY_SAMPLES: usize = 256;
 /// Bits per long frame.
 const LONG_FRAME_BITS: usize = LONG_FRAME_BYTES * 8;
 
-/// Samples spanning a long frame's payload (after the preamble): 112 bits ×
-/// 2 samples/bit = 224 samples.
-const LONG_FRAME_PAYLOAD_SAMPLES: usize = LONG_FRAME_BITS * SAMPLES_PER_BIT;
+/// Bits per short frame.
+const SHORT_FRAME_BITS: usize = SHORT_FRAME_BYTES * 8;
 
-/// Samples covering preamble + long payload.
-const FULL_LONG_WINDOW: usize = PREAMBLE_SAMPLES + LONG_FRAME_PAYLOAD_SAMPLES;
+/// Samples covering preamble + at least a short payload. This is the minimum
+/// we need to even *try* to read a preamble plus its 5-bit DF prefix; if the
+/// DF resolves to a long frame and we don't have enough buffer, we break out
+/// and the carry-over picks up the trail on the next call.
+const MIN_DETECTION_WINDOW: usize =
+    PREAMBLE_SAMPLES + SHORT_FRAME_BITS * SAMPLES_PER_BIT;
 
 impl Default for FrameDetector {
     fn default() -> Self {
@@ -296,7 +299,7 @@ impl FrameDetector {
         let mut conf = [0u8; LONG_FRAME_BITS];
         let mut bytes = [0u8; MAX_FRAME_BYTES];
 
-        while i + FULL_LONG_WINDOW <= n {
+        while i + MIN_DETECTION_WINDOW <= n {
             // Update floor with one sample of look-back. We update with the
             // current sample so that the threshold reflects the local
             // baseline at the candidate position.
