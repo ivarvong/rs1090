@@ -162,3 +162,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multiplicative variant `α = 15/16, β = 15/32`. The shift-only form we
   actually use peaks at ~11.8% in continuous math; corrected in both the
   design doc and module-level docs.
+
+## M6: validation, hardening, and a staff+ quality pass
+
+### Added
+
+- **Differential testing harness** (`scripts/diff_pymodes.py`) — runs
+  rs1090 `replay` over an `.iq` corpus and cross-checks every CRC-clean
+  DF 11 / DF 17 / DF 18 frame's decoded fields against pyModeS, the
+  de facto Python reference for ADS-B decoding. ICAO, altitude, CPR
+  even/odd, CPR lat/lon, callsign, ground speed, and vertical rate
+  all compared per-frame; reports agreement counts plus sample
+  disagreements. See [`docs/differential-testing.md`](docs/differential-testing.md).
+- **libFuzzer harness** at `crates/rs1090/fuzz/` with three targets:
+  - `decode_message` — `Frame::from_bytes` → `message::decode`.
+  - `process_frame` — full IQ → magnitude → preamble → CRC pipeline.
+  - `crc_check` — `crc::check` on arbitrary 7- or 14-byte buffers.
+  Each target ships with a seed corpus of real-frame inputs from a
+  live capture. Crash-free across tens of millions of executions to
+  date. See [`docs/fuzzing.md`](docs/fuzzing.md).
+- **Live aircraft map UI** served at `GET /` from `rs1090-serve`.
+  Single static page (HTML/CSS/JS embedded via `include_str!`,
+  Leaflet from a CDN), seeds from `/aircraft` on load and subscribes
+  to `/stream` for live updates. Aircraft icons rotate to track
+  angle; popups show callsign, lat/lon, altitude (ft + baro/gnss
+  tag), track, ground speed, and vertical rate.
+- **Altitude in the wire format**: `AircraftPosition` and
+  `SnapshotPosition` now carry `alt_ft: Option<i32>` and
+  `alt_source: Option<"baro"|"gnss">` — the decoder was already
+  extracting altitude; the wire path was dropping it.
+- **`Frame::from_bytes` constructor** under the `test-utils` feature,
+  so fuzz targets and integration tests can build a `Frame` from raw
+  bytes without re-synthesising the demod pipeline.
+- **`BitReader` helper** in `message.rs` — 1-indexed MSB-first reader
+  that makes `decode_velocity` and `decode_airborne_position`
+  line-by-line auditable against DO-260B. Replaces a dozen ad-hoc
+  `(me_bits >> (56 - N)) & MASK` expressions.
+- **`/healthz` returns 503 when the decoder thread has died** —
+  disarm-able Drop guard distinguishes clean file-replay completion
+  (still healthy) from error / panic exit (unhealthy).
+- **`PositionSource::wire_tag()`** consolidates the three
+  duplicated `match source { Global => "global", Local => "local" }`
+  blocks in CLI, broadcaster, and events into one method.
+- **GitHub Actions CI** at `.github/workflows/ci.yml` — `cargo test`,
+  `cargo clippy -- -D warnings`, `cargo fmt --check`, and an MSRV
+  matrix row pinned at the workspace `rust-version = "1.85"`.
+- **Raspberry Pi deployment guide** at [`docs/raspberry-pi.md`](docs/raspberry-pi.md),
+  validated end-to-end on a Pi Zero 2 W with an RTL-SDR dongle.
+  Cross-compile via `cargo-zigbuild` targeting
+  `aarch64-unknown-linux-gnu`; measured CPU 13–17 % of one core,
+  resident memory ~5 MB. The original Pi Zero W (ARMv6) is still
+  the design target and remains unvalidated; status is documented.
+- **Development runbook** at [`docs/development.md`](docs/development.md) —
+  local build, test, format, lint workflow plus the pre-push
+  checklist that CI mirrors.
+
+### Changed
+
+- **`Icao` field is private.** Construct via `from_bytes`, `from_u24`
+  (validates), `from_hex`, or `Icao::ZERO`. Access the raw 24-bit
+  value via `as_u24()`. The "high byte always zero" invariant is now
+  enforced by construction instead of by comment.
+- **Frame layer is now allocation-free in the steady state.**
+  `FrameDetector` owns its magnitude scratch buffer (sized in
+  `new()` / `with_chunk_capacity`); `process` clears and reuses it.
+  The `process_is_zero_allocation_in_steady_state` test pins the
+  invariant.
+- **Tracker is `LinkedHashMap<Icao, Aircraft, FxBuildHasher>`** —
+  O(1) LRU touch on every ingest, O(1) eviction at capacity, O(k)
+  stale-prune from the LRU end, and the address-XOR active-set scan
+  iterates MRU → LRU so it exits the moment it crosses the
+  active-ICAO window instead of scanning the whole table.
+- **`SurveillanceReply` variant** carries the original `Frame`
+  instead of a pre-rendered hex string. Encoding decisions now live
+  at the serialisation boundary.
+- **Public API surface narrowed**: `demod` and `magnitude` are
+  `pub(crate)`. A new `pub mod test_utils` (gated on the `test-utils`
+  feature) re-exports the small set of helpers benches, fuzz targets,
+  and integration tests need.
+- **Read-only public types are `#[non_exhaustive]`** — `Aircraft`,
+  `Counters`, `TimedPosition`, `PositionSource`, `Altitude`, and the
+  10 wire-format / snapshot types in `rs1090-serve`. Adding fields no
+  longer requires a semver-major bump.
+- **`SnapshotPosition.source` and `AircraftPosition.source`** are now
+  `PositionSource` enums with a custom serializer, replacing the
+  stringly-typed `&'static str`. The wire format is unchanged.
+
+### Fixed
+
+- **Ground speed truncates instead of rounds.** `decode_velocity`
+  previously did `(ew_f.hypot(ns_f)).round() as u16`; the differential
+  test harness's first run flagged 40 disagreements with pyModeS,
+  every one off by exactly +1 kt. Changed to `.trunc()` to match
+  pyModeS and the `(int)sqrt(...)` C convention. DO-260B doesn't
+  specify; the practical difference is bounded by 1 kt. Pinned with
+  `ground_velocity_truncates_speed_fraction` using ME bytes from a
+  real frame in the corpus.
+
+### Removed
+
+- `parse_icao` function in `rs1090-serve` (replaced by
+  `Icao::from_hex` on the type itself).
+- `NoiseFloor::current` from production builds (only the test
+  module called it; gated on `#[cfg(test)]`).
