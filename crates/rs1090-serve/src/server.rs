@@ -23,6 +23,7 @@ use crate::events::{AircraftSnapshot, EventEnvelope};
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/lga", get(lga))
         .route("/healthz", get(healthz))
         .route("/aircraft", get(list_aircraft))
         .route("/aircraft/:icao", get(get_aircraft))
@@ -38,6 +39,18 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 
 async fn index() -> Response {
     ([("content-type", "text/html; charset=utf-8")], INDEX_HTML).into_response()
+}
+
+/// Purpose-built page: aircraft on approach to LGA, ranked by distance
+/// from the viewer's vantage point. User location is hardcoded to the
+/// development host's coordinates but overridable via `?me=lat,lon`.
+/// All the approach detection (runway-course matching, range/altitude
+/// gating) happens in the browser against the existing `/stream` SSE
+/// data — no server-side LGA-specific code.
+const LGA_HTML: &str = include_str!("../static/lga.html");
+
+async fn lga() -> Response {
+    ([("content-type", "text/html; charset=utf-8")], LGA_HTML).into_response()
 }
 
 /// Returns 200 OK / `"ok"` while the decoder thread is alive, 503

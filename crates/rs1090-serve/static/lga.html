@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LGA approach watch — rs1090</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="">
+  <style>
+    html, body { margin: 0; height: 100%; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: #e6e8eb; }
+    #app { display: grid; grid-template-columns: 360px 1fr; height: 100%; background: #0e1014; }
+    #panel { overflow-y: auto; border-right: 1px solid #1f2329; padding: 14px 14px 24px; }
+    #map { background: #1a1c20; }
+    #panel h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
+    #panel .sub { color: #8b939c; font-size: 11px; margin-bottom: 10px; }
+
+    .stat-grid { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 11px; margin-bottom: 16px; }
+    .stat-grid .k { color: #8b939c; }
+    .stat-grid .v { color: #e6e8eb; font-variant-numeric: tabular-nums; }
+
+    #status { font-size: 11px; margin: 4px 0 12px; }
+    #status.ok::before    { content: "● "; color: #4ade80; }
+    #status.bad::before   { content: "● "; color: #f87171; }
+    #status.wait::before  { content: "● "; color: #fbbf24; }
+
+    #runway { font-size: 11px; padding: 6px 8px; background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.3); border-radius: 4px; margin-bottom: 14px; }
+    #runway b { color: #a5b4fc; font-size: 13px; }
+
+    #aircraft-title { margin: 0 0 4px; font-size: 11px; color: #8b939c; text-transform: uppercase; letter-spacing: 0.06em; }
+    #aircraft { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    #aircraft li { padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.04); cursor: pointer; }
+    #aircraft li:hover { background: rgba(255,255,255,0.03); }
+    #aircraft .row1 { display: flex; justify-content: space-between; align-items: baseline; }
+    #aircraft .callsign { color: #a5b4fc; font-weight: 600; font-size: 13px; }
+    #aircraft .icao { color: #8b939c; font-size: 10px; }
+    #aircraft .approach-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(74,222,128,0.15); color: #4ade80; border: 1px solid rgba(74,222,128,0.4); }
+    #aircraft .approach-tag.unknown { background: transparent; color: #8b939c; border-color: rgba(139,147,156,0.3); }
+    #aircraft .row2 { color: #d4d6da; margin-top: 3px; font-size: 11px; }
+    #aircraft .dim { color: #8b939c; }
+
+    /* Plane markers. */
+    .plane { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; transition: transform 200ms linear; }
+    .plane svg { width: 24px; height: 24px; filter: drop-shadow(0 0 2px rgba(0,0,0,0.6)); }
+    .plane .body { fill: #60a5fa; stroke: #0b1120; stroke-width: 1.2; }
+    .plane.approach .body { fill: #4ade80; }
+    .plane.stale .body { fill: #6b7280; }
+    .plane .label { position: absolute; top: 26px; left: 50%; transform: translateX(-50%); color: #e6e8eb; font-size: 10px; font-weight: 600; background: rgba(20,22,26,0.85); padding: 1px 5px; border-radius: 3px; white-space: nowrap; pointer-events: none; }
+
+    /* User / LGA pins. */
+    .pin { position: relative; font-size: 16px; line-height: 1; transform: translate(-50%, -100%); }
+    .pin .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.5); }
+    .pin .label { position: absolute; left: 18px; top: -2px; white-space: nowrap; font-size: 10px; font-weight: 600; background: rgba(20,22,26,0.85); padding: 1px 5px; border-radius: 3px; }
+    .pin.user .dot { background: #fbbf24; }
+    .pin.lga .dot { background: #a5b4fc; }
+
+    .leaflet-popup-content-wrapper { background: #14161a; color: #e6e8eb; }
+    .leaflet-popup-content { font-size: 12px; margin: 10px 12px; }
+    .leaflet-popup-tip { background: #14161a; }
+    .leaflet-popup-content b { color: #a5b4fc; }
+    .leaflet-popup-content td { padding: 1px 4px; }
+    .leaflet-popup-content td:first-child { color: #8b939c; }
+    .leaflet-control-attribution { background: rgba(20,22,26,0.7) !important; color: #8b939c !important; }
+    .leaflet-control-attribution a { color: #a5b4fc !important; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside id="panel">
+      <h1>LGA approach watch</h1>
+      <div class="sub">aircraft on final to KLGA, visible from you</div>
+      <div id="status" class="wait">connecting…</div>
+
+      <div class="stat-grid">
+        <span class="k">you</span><span class="v" id="you">40.7021, -73.9826</span>
+        <span class="k">LGA</span><span class="v" id="lga">40.7769, -73.8740 · 6 nm · ENE</span>
+        <span class="k">looking</span><span class="v">east</span>
+        <span class="k">tracked</span><span class="v" id="tracked">0</span>
+        <span class="k">low + near</span><span class="v" id="low-near">0</span>
+        <span class="k">on approach</span><span class="v" id="approach-count">0</span>
+      </div>
+
+      <div id="runway">active runway guess: <b id="runway-guess">—</b></div>
+
+      <h2 id="aircraft-title">aircraft (closest first)</h2>
+      <ul id="aircraft"></ul>
+    </aside>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script>
+  "use strict";
+
+  // --- Constants --------------------------------------------------------------
+
+  // Read user location from the URL: ?me=lat,lon. Defaults to the
+  // location-of-record provided when this page was built. Permits anyone
+  // on the tailnet to point the page at their own viewpoint.
+  const params = new URLSearchParams(location.search);
+  const meStr = params.get("me");
+  const ME = meStr && meStr.split(",").length === 2
+    ? meStr.split(",").map(Number)
+    : [40.70214469662103, -73.98261621204223];
+
+  // LaGuardia airport reference point.
+  const LGA = [40.7769, -73.8740];
+
+  // LGA's four runway approach courses (the heading an arriving
+  // aircraft must be flying as they cross the threshold). True north;
+  // magnetic declination at NYC is ~-13°.
+  const APPROACH_COURSES_TRUE = [
+    { runway: "04", course: 27 },
+    { runway: "22", course: 207 },
+    { runway: "13", course: 117 },
+    { runway: "31", course: 297 },
+  ];
+
+  // Distance limits.
+  const MAX_RANGE_NM = 15;     // beyond this we ignore even with low alt
+  const MAX_APPROACH_ALT = 6000;
+  const APPROACH_HEADING_TOL = 25; // deg
+
+  // --- Geo math ---------------------------------------------------------------
+
+  const EARTH_R_NM = 3440.065;
+
+  function toRad(deg) { return (deg * Math.PI) / 180; }
+  function toDeg(rad) { return (rad * 180) / Math.PI; }
+
+  function haversineNm(a, b) {
+    const [lat1, lon1] = a, [lat2, lon2] = b;
+    const φ1 = toRad(lat1), φ2 = toRad(lat2);
+    const dφ = toRad(lat2 - lat1), dλ = toRad(lon2 - lon1);
+    const x = Math.sin(dφ/2)**2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ/2)**2;
+    return 2 * EARTH_R_NM * Math.asin(Math.sqrt(x));
+  }
+
+  function bearingDeg(from, to) {
+    const [lat1, lon1] = from, [lat2, lon2] = to;
+    const φ1 = toRad(lat1), φ2 = toRad(lat2);
+    const dλ = toRad(lon2 - lon1);
+    const y = Math.sin(dλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(dλ);
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  }
+
+  function compass(deg) {
+    const dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+    return dirs[Math.round(deg / 22.5) % 16];
+  }
+
+  function angularDistance(a, b) {
+    let d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+  }
+
+  // --- Approach classifier ---------------------------------------------------
+
+  // Given an aircraft's track, return the matching LGA runway (or null).
+  function approachRunway(track) {
+    if (!Number.isFinite(track)) return null;
+    let best = null;
+    for (const r of APPROACH_COURSES_TRUE) {
+      const d = angularDistance(track, r.course);
+      if (d <= APPROACH_HEADING_TOL && (!best || d < best.d)) {
+        best = { runway: r.runway, d };
+      }
+    }
+    return best ? best.runway : null;
+  }
+
+  function isOnApproach(a) {
+    if (!Number.isFinite(a.distLga) || a.distLga > MAX_RANGE_NM) return false;
+    if (a.alt_ft == null || a.alt_ft > MAX_APPROACH_ALT) return false;
+    return approachRunway(a.track) !== null;
+  }
+
+  // --- Map setup --------------------------------------------------------------
+
+  const map = L.map("map", { zoomControl: true, attributionControl: true })
+    .setView(LGA, 11);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    attribution: "&copy; OpenStreetMap &copy; CARTO",
+    subdomains: "abcd",
+    maxZoom: 19,
+  }).addTo(map);
+
+  // Pins for user + LGA.
+  function pinIcon(cls, label) {
+    return L.divIcon({
+      className: "",
+      html: `<div class="pin ${cls}"><div class="dot"></div><div class="label">${label}</div></div>`,
+      iconSize: [14, 14],
+      iconAnchor: [7, 14],
+    });
+  }
+  L.marker(ME, { icon: pinIcon("user", "you") }).addTo(map);
+  L.marker(LGA, { icon: pinIcon("lga", "LGA") }).addTo(map);
+  L.polyline([ME, LGA], { color: "#fbbf24", weight: 1.5, opacity: 0.4, dashArray: "4 5" }).addTo(map);
+
+  // Fit view to include user + LGA, with margin.
+  map.fitBounds(L.latLngBounds([ME, LGA]), { padding: [60, 60] });
+
+  // --- Aircraft state --------------------------------------------------------
+
+  const aircraft = new Map();
+
+  function planeIconHtml(callsign, track, isApproach, isStale) {
+    const rot = Number.isFinite(track) ? track : 0;
+    const cls = ["plane"];
+    if (isApproach) cls.push("approach");
+    if (isStale) cls.push("stale");
+    const label = callsign ? `<div class="label">${escapeHtml(callsign)}</div>` : "";
+    return `<div class="${cls.join(" ")}" style="transform: rotate(${rot}deg);">
+      <svg viewBox="-12 -12 24 24"><path class="body" d="M0,-10 L7,8 L0,4 L-7,8 Z"/></svg>
+      ${label}
+    </div>`;
+  }
+
+  function makeIcon(callsign, track, isApproach, isStale) {
+    return L.divIcon({
+      className: "",
+      html: planeIconHtml(callsign, track, isApproach, isStale),
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  function ensureAircraft(icao) {
+    let a = aircraft.get(icao);
+    if (!a) {
+      a = { icao, marker: null, callsign: null, lat: null, lon: null, alt_ft: null, alt_source: null,
+            track: null, gs_mps: null, vr_mps: null, lastUpdate: Date.now() };
+      aircraft.set(icao, a);
+    }
+    return a;
+  }
+
+  function recompute(a) {
+    if (Number.isFinite(a.lat) && Number.isFinite(a.lon)) {
+      a.distLga = haversineNm([a.lat, a.lon], LGA);
+      a.distMe = haversineNm([a.lat, a.lon], ME);
+      a.bearingFromMe = bearingDeg(ME, [a.lat, a.lon]);
+      a.compassFromMe = compass(a.bearingFromMe);
+      a.approachRunway = approachRunway(a.track);
+      a.onApproach = isOnApproach(a);
+    }
+  }
+
+  function refreshMarker(a) {
+    if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
+    const stale = (Date.now() - a.lastUpdate) > 30_000;
+    const icon = makeIcon(a.callsign, a.track, a.onApproach, stale);
+    if (!a.marker) {
+      a.marker = L.marker([a.lat, a.lon], { icon }).addTo(map);
+      a.marker.bindPopup(() => popupHtml(a));
+    } else {
+      a.marker.setLatLng([a.lat, a.lon]);
+      a.marker.setIcon(icon);
+      if (a.marker.isPopupOpen()) a.marker.getPopup().setContent(popupHtml(a));
+    }
+  }
+
+  function popupHtml(a) {
+    const knots = a.gs_mps != null ? (a.gs_mps * 1.94384).toFixed(0) + " kt" : "—";
+    const vr_fpm = a.vr_mps != null ? Math.round(a.vr_mps * 196.85) : null;
+    const vr = vr_fpm != null ? (vr_fpm >= 0 ? `+${vr_fpm}` : vr_fpm) + " fpm" : "—";
+    const trk = Number.isFinite(a.track) ? `${a.track.toFixed(0)}°` : "—";
+    const alt = a.alt_ft != null ? `${a.alt_ft.toLocaleString()} ft${a.alt_source ? ` (${a.alt_source})` : ""}` : "—";
+    const distLga = Number.isFinite(a.distLga) ? `${a.distLga.toFixed(1)} nm` : "—";
+    const distMe = Number.isFinite(a.distMe) ? `${a.distMe.toFixed(1)} nm ${a.compassFromMe}` : "—";
+    const cs = a.callsign ? `<b>${escapeHtml(a.callsign)}</b>` : "<i>no callsign</i>";
+    const tag = a.approachRunway ? `<span style="color:#4ade80">→ ${a.approachRunway}</span>` : "";
+    return `<div><b>${escapeHtml(a.icao)}</b> &mdash; ${cs} ${tag}</div>
+      <table>
+        <tr><td>altitude</td><td>${alt}</td></tr>
+        <tr><td>track / speed</td><td>${trk} / ${knots}</td></tr>
+        <tr><td>v/s</td><td>${vr}</td></tr>
+        <tr><td>from LGA</td><td>${distLga}</td></tr>
+        <tr><td>from you</td><td>${distMe}</td></tr>
+      </table>`;
+  }
+
+  // --- Panel UI --------------------------------------------------------------
+
+  const statusEl = document.getElementById("status");
+  const trackedEl = document.getElementById("tracked");
+  const lowNearEl = document.getElementById("low-near");
+  const approachCountEl = document.getElementById("approach-count");
+  const runwayGuessEl = document.getElementById("runway-guess");
+  const aircraftList = document.getElementById("aircraft");
+
+  // Stat: distance from user to LGA (one-shot, immutable).
+  document.getElementById("lga").textContent =
+    `${LGA[0].toFixed(4)}, ${LGA[1].toFixed(4)} · ${haversineNm(ME, LGA).toFixed(1)} nm · ${compass(bearingDeg(ME, LGA))}`;
+  document.getElementById("you").textContent = `${ME[0].toFixed(4)}, ${ME[1].toFixed(4)}`;
+
+  function setStatus(text, cls) {
+    statusEl.className = cls;
+    statusEl.textContent = text;
+  }
+
+  function renderPanel() {
+    let tracked = 0, lowNear = 0, approaching = 0;
+    const runwayVotes = Object.create(null);
+    const onApproach = [];
+    const nearby = [];
+
+    for (const a of aircraft.values()) {
+      tracked++;
+      if (!Number.isFinite(a.distLga)) continue;
+      if (a.distLga <= MAX_RANGE_NM && a.alt_ft != null && a.alt_ft <= MAX_APPROACH_ALT) {
+        lowNear++;
+        nearby.push(a);
+      }
+      if (a.onApproach) {
+        approaching++;
+        onApproach.push(a);
+        runwayVotes[a.approachRunway] = (runwayVotes[a.approachRunway] || 0) + 1;
+      }
+    }
+    trackedEl.textContent = tracked;
+    lowNearEl.textContent = lowNear;
+    approachCountEl.textContent = approaching;
+
+    // Active runway guess: the runway with the most current approachers.
+    let best = null;
+    for (const [r, n] of Object.entries(runwayVotes)) {
+      if (!best || n > best.n) best = { r, n };
+    }
+    runwayGuessEl.textContent = best ? `${best.r} (${best.n} aircraft on final)` : "—";
+
+    // List: approachers first, then nearby low aircraft, by distance from user.
+    const visible = onApproach.slice();
+    for (const a of nearby) if (!visible.includes(a)) visible.push(a);
+    visible.sort((x, y) => (x.distMe ?? 999) - (y.distMe ?? 999));
+
+    aircraftList.innerHTML = visible.slice(0, 16).map(a => {
+      const cs = a.callsign ? escapeHtml(a.callsign) : "<i style='color:#8b939c'>—</i>";
+      const tag = a.onApproach
+        ? `<span class="approach-tag">→ rwy ${a.approachRunway}</span>`
+        : `<span class="approach-tag unknown">nearby</span>`;
+      const alt = a.alt_ft != null ? `${a.alt_ft.toLocaleString()} ft` : "—";
+      const dist = Number.isFinite(a.distMe) ? `${a.distMe.toFixed(1)} nm ${a.compassFromMe}` : "—";
+      const trk = Number.isFinite(a.track) ? `${a.track.toFixed(0)}°` : "";
+      return `<li data-icao="${escapeHtml(a.icao)}">
+        <div class="row1"><span><span class="callsign">${cs}</span> <span class="icao">${escapeHtml(a.icao)}</span></span>${tag}</div>
+        <div class="row2">${alt} · ${dist} · trk ${trk}</div>
+      </li>`;
+    }).join("");
+  }
+
+  aircraftList.addEventListener("click", e => {
+    const li = e.target.closest("li[data-icao]");
+    if (!li) return;
+    const a = aircraft.get(li.dataset.icao);
+    if (a && a.marker) {
+      map.setView([a.lat, a.lon], Math.max(map.getZoom(), 12));
+      a.marker.openPopup();
+    }
+  });
+
+  // --- Seed + subscribe -------------------------------------------------------
+
+  // Bound the SSE subscription to the LGA approach corridor. Saves both
+  // bandwidth and JS work on the client.
+  const BBOX = "40.55,-74.15,40.95,-73.65";
+  const STREAM_URL = `/stream?bbox=${BBOX}&alt_max=${MAX_APPROACH_ALT + 2000}`;
+
+  async function seedFromSnapshot() {
+    try {
+      const r = await fetch("/aircraft");
+      if (!r.ok) return;
+      const list = await r.json();
+      for (const s of list) {
+        if (!s.position) continue;
+        const a = ensureAircraft(s.icao);
+        a.callsign = s.callsign || a.callsign;
+        a.lat = s.position.lat;
+        a.lon = s.position.lon;
+        if (s.position.alt_ft != null) a.alt_ft = s.position.alt_ft;
+        if (s.position.alt_source != null) a.alt_source = s.position.alt_source;
+        if (s.velocity) {
+          a.track = s.velocity.track_deg ?? s.velocity.heading_deg ?? a.track;
+          a.gs_mps = s.velocity.gs_mps ?? a.gs_mps;
+          a.vr_mps = s.velocity.vr_mps ?? a.vr_mps;
+        }
+        recompute(a);
+        if (Number.isFinite(a.distLga) && a.distLga <= MAX_RANGE_NM + 5) {
+          refreshMarker(a);
+        }
+      }
+      renderPanel();
+    } catch {}
+  }
+
+  function openStream() {
+    setStatus("connecting…", "wait");
+    const es = new EventSource(STREAM_URL);
+    es.addEventListener("open", () => setStatus("connected", "ok"));
+    es.addEventListener("error", () => setStatus("disconnected — reconnecting…", "bad"));
+
+    es.addEventListener("identification", e => {
+      const d = JSON.parse(e.data);
+      const a = ensureAircraft(d.icao);
+      a.callsign = d.callsign;
+      a.lastUpdate = Date.now();
+      refreshMarker(a);
+      renderPanel();
+    });
+    es.addEventListener("position", e => {
+      const d = JSON.parse(e.data);
+      const a = ensureAircraft(d.icao);
+      a.lat = d.lat; a.lon = d.lon;
+      if (d.alt_ft != null) a.alt_ft = d.alt_ft;
+      if (d.alt_source != null) a.alt_source = d.alt_source;
+      a.lastUpdate = Date.now();
+      recompute(a);
+      refreshMarker(a);
+      renderPanel();
+    });
+    es.addEventListener("velocity", e => {
+      const d = JSON.parse(e.data);
+      const a = ensureAircraft(d.icao);
+      if (d.track_deg != null) a.track = d.track_deg;
+      else if (d.heading_deg != null) a.track = d.heading_deg;
+      if (d.gs_mps != null) a.gs_mps = d.gs_mps;
+      if (d.vr_mps != null) a.vr_mps = d.vr_mps;
+      a.lastUpdate = Date.now();
+      recompute(a);
+      refreshMarker(a);
+      renderPanel();
+    });
+    es.addEventListener("lost", e => {
+      const d = JSON.parse(e.data);
+      const a = aircraft.get(d.icao);
+      if (a && a.marker) map.removeLayer(a.marker);
+      aircraft.delete(d.icao);
+      renderPanel();
+    });
+  }
+
+  // Periodically refresh stale tags so marker colour decays even
+  // when no events have come in.
+  setInterval(() => {
+    for (const a of aircraft.values()) refreshMarker(a);
+    renderPanel();
+  }, 10_000);
+
+  seedFromSnapshot();
+  openStream();
+  </script>
+</body>
+</html>
