@@ -85,7 +85,10 @@ impl NoiseFloor {
     /// Panics if `shift` is `0` or greater than `16`.
     #[must_use]
     pub fn new(initial: u16, shift: u8) -> Self {
-        assert!((1..=16).contains(&shift), "shift must be in 1..=16, got {shift}");
+        assert!(
+            (1..=16).contains(&shift),
+            "shift must be in 1..=16, got {shift}"
+        );
         Self {
             acc: (u32::from(initial)) << shift,
             shift,
@@ -119,13 +122,15 @@ impl NoiseFloor {
         let s = u32::from(sample);
         // `acc >> shift` is the current floor; subtract it as part of the
         // update and add the new sample.
-        self.acc = self.acc.wrapping_add(s).wrapping_sub(self.acc >> self.shift);
+        self.acc = self
+            .acc
+            .wrapping_add(s)
+            .wrapping_sub(self.acc >> self.shift);
         // Saturate to u16 on return; the floor itself can't exceed the
         // sample range in steady state, but during transients we clamp to
         // be safe.
         ((self.acc >> self.shift).min(u32::from(u16::MAX))) as u16
     }
-
 }
 
 // --- Preamble correlator -----------------------------------------------------
@@ -252,7 +257,11 @@ pub fn aggregate_confidence(per_bit: &[u8]) -> u8 {
 /// `bits.len()` must equal `bytes.len() * 8`. Bit 0 of `bits` lands in the
 /// MSB of `bytes[0]`, matching the on-the-wire order of Mode S frames.
 pub fn pack_bits_msb(bits: &[bool], bytes: &mut [u8]) {
-    assert_eq!(bits.len(), bytes.len() * 8, "bit count must be 8× byte count");
+    assert_eq!(
+        bits.len(),
+        bytes.len() * 8,
+        "bit count must be 8× byte count"
+    );
     for (byte_idx, b) in bytes.iter_mut().enumerate() {
         let mut acc = 0u8;
         for k in 0..8 {
@@ -440,7 +449,10 @@ mod tests {
             let s0 = (128 + split) as u16;
             let s1 = (128 - split) as u16;
             let (_, c) = slice_bit(s0, s1);
-            assert!(c >= prev, "confidence dropped at split {split}: {prev} -> {c}");
+            assert!(
+                c >= prev,
+                "confidence dropped at split {split}: {prev} -> {c}"
+            );
             prev = c;
         }
         assert_eq!(prev, 255);
@@ -505,8 +517,8 @@ mod tests {
     #[test]
     fn synth_then_slice_recovers_bits_at_high_snr() {
         let bits_in: [bool; 16] = [
-            true, false, true, true, false, false, true, false,
-            false, true, false, true, true, true, false, true,
+            true, false, true, true, false, false, true, false, false, true, false, true, true,
+            true, false, true,
         ];
         let mut samples = [0u16; 32];
         synth_bits_as_magnitude(&bits_in, 240, 10, &mut samples);

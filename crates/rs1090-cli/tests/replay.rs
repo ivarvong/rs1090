@@ -63,13 +63,7 @@ fn synth_df17_frame() -> [u8; LONG_FRAME_BYTES] {
 }
 
 /// Encode a frame as a magnitude stream plus leading/trailing noise floor.
-fn synth_magnitudes(
-    frame: &[u8],
-    pulse: u16,
-    floor: u16,
-    lead: usize,
-    trail: usize,
-) -> Vec<u16> {
+fn synth_magnitudes(frame: &[u8], pulse: u16, floor: u16, lead: usize, trail: usize) -> Vec<u16> {
     let payload_bits = frame.len() * 8;
     let payload_samples = payload_bits * SAMPLES_PER_BIT;
     let total = lead + PREAMBLE_SAMPLES + payload_samples + trail;

@@ -14,8 +14,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![doc(html_root_url = "https://docs.rs/rs1090")]
 
-pub mod crc;
 pub mod cpr;
+pub mod crc;
 pub mod frame;
 pub mod message;
 

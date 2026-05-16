@@ -371,9 +371,7 @@ pub fn decode(frame: &Frame) -> Result<Message, DecodeError> {
         | DownlinkFormat::ShortAcas
         | DownlinkFormat::LongAcas
         | DownlinkFormat::CommBAltitude
-        | DownlinkFormat::CommBIdentity => {
-            Ok(Message::SurveillanceReply { frame: *frame })
-        }
+        | DownlinkFormat::CommBIdentity => Ok(Message::SurveillanceReply { frame: *frame }),
         DownlinkFormat::Reserved(_) => Ok(Message::Other { df }),
     }
 }
@@ -393,7 +391,9 @@ fn decode_extended_squitter(bytes: &[u8]) -> ExtendedSquitter {
         TypeCode::AirbornePosition => {
             SquitterPayload::AirbornePosition(decode_airborne_position(me))
         }
-        TypeCode::Velocity => decode_velocity(me).map_or(SquitterPayload::Raw(me), SquitterPayload::Velocity),
+        TypeCode::Velocity => {
+            decode_velocity(me).map_or(SquitterPayload::Raw(me), SquitterPayload::Velocity)
+        }
         _ => SquitterPayload::Raw(me),
     };
 
@@ -657,7 +657,11 @@ fn decode_velocity(me: [u8; 7]) -> Result<Velocity, DecodeError> {
             let speed = ew_f.hypot(ns_f).trunc() as u16;
             // Heading is degrees clockwise from north: atan2(east, north).
             let heading = ew_f.atan2(ns_f).to_degrees();
-            let heading = if heading < 0.0 { heading + 360.0 } else { heading };
+            let heading = if heading < 0.0 {
+                heading + 360.0
+            } else {
+                heading
+            };
             VelocityKind::Ground {
                 speed_kt: speed,
                 heading_deg: heading as f32,
@@ -723,15 +727,24 @@ mod tests {
 
     #[test]
     fn icao_from_u24_rejects_high_bits() {
-        assert_eq!(Icao::from_u24(0x00FF_FFFF).map(Icao::as_u24), Some(0x00FF_FFFF));
+        assert_eq!(
+            Icao::from_u24(0x00FF_FFFF).map(Icao::as_u24),
+            Some(0x00FF_FFFF)
+        );
         assert_eq!(Icao::from_u24(0x0100_0000), None);
         assert_eq!(Icao::from_u24(0xFFFF_FFFF), None);
     }
 
     #[test]
     fn icao_from_hex_accepts_both_cases_and_rejects_garbage() {
-        assert_eq!(Icao::from_hex("A1B2C3"), Some(Icao::from_bytes([0xA1, 0xB2, 0xC3])));
-        assert_eq!(Icao::from_hex("a1b2c3"), Some(Icao::from_bytes([0xA1, 0xB2, 0xC3])));
+        assert_eq!(
+            Icao::from_hex("A1B2C3"),
+            Some(Icao::from_bytes([0xA1, 0xB2, 0xC3]))
+        );
+        assert_eq!(
+            Icao::from_hex("a1b2c3"),
+            Some(Icao::from_bytes([0xA1, 0xB2, 0xC3]))
+        );
         assert_eq!(Icao::from_hex("000001"), Some(Icao::from_bytes([0, 0, 1])));
         assert_eq!(Icao::from_hex(""), None);
         assert_eq!(Icao::from_hex("A1B2C"), None); // too short
@@ -938,10 +951,7 @@ mod tests {
             5,
             &mut mags[pre + PREAMBLE_SAMPLES..pre + PREAMBLE_SAMPLES + payload_samples],
         );
-        let samples: Vec<Iq> = mags
-            .iter()
-            .map(|&m| Iq::new(m.min(127) as i8, 0))
-            .collect();
+        let samples: Vec<Iq> = mags.iter().map(|&m| Iq::new(m.min(127) as i8, 0)).collect();
         let mut det = FrameDetector::new();
         det.reset_noise_floor(5);
         let mut out = Vec::new();

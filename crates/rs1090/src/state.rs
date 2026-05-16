@@ -337,11 +337,7 @@ impl StateTracker {
     /// the active-set/counters); the payload is not decoded into a
     /// `Message` because we don't yet implement the address-stripped CRC
     /// path's payload extraction.
-    fn resolve_icao(
-        &self,
-        frame: &Frame,
-        at: Instant,
-    ) -> Option<(Icao, Option<Message>)> {
+    fn resolve_icao(&self, frame: &Frame, at: Instant) -> Option<(Icao, Option<Message>)> {
         match frame.crc_outcome() {
             CrcOutcome::Clean | CrcOutcome::Corrected { .. } => {
                 let msg = message::decode(frame).ok()?;
@@ -370,9 +366,7 @@ impl StateTracker {
                 // `ACTIVE_ICAO_WINDOW` every subsequent entry is older
                 // still — we can stop instead of scanning the whole map.
                 for (icao, aircraft) in self.by_icao.iter().rev() {
-                    if at.saturating_duration_since(aircraft.last_seen)
-                        >= ACTIVE_ICAO_WINDOW
-                    {
+                    if at.saturating_duration_since(aircraft.last_seen) >= ACTIVE_ICAO_WINDOW {
                         break;
                     }
                     if crc::crc24(&icao.to_bytes()) == syndrome {
@@ -606,10 +600,7 @@ mod tests {
             5,
             &mut mags[pre + PREAMBLE_SAMPLES..pre + PREAMBLE_SAMPLES + payload_samples],
         );
-        let samples: Vec<Iq> = mags
-            .iter()
-            .map(|&m| Iq::new(m.min(127) as i8, 0))
-            .collect();
+        let samples: Vec<Iq> = mags.iter().map(|&m| Iq::new(m.min(127) as i8, 0)).collect();
         let mut det = FrameDetector::new();
         det.reset_noise_floor(5);
         let mut out = Vec::new();
@@ -636,10 +627,8 @@ mod tests {
     /// altitude unavailable.
     fn airborne_position_me(odd: bool, lat_cpr: u32, lon_cpr: u32) -> [u8; 7] {
         let tc: u64 = 11;
-        let me_bits: u64 = (tc << 51)
-            | (u64::from(odd) << 34)
-            | (u64::from(lat_cpr) << 17)
-            | u64::from(lon_cpr);
+        let me_bits: u64 =
+            (tc << 51) | (u64::from(odd) << 34) | (u64::from(lat_cpr) << 17) | u64::from(lon_cpr);
         let mut me = [0u8; 7];
         for (i, byte) in me.iter_mut().enumerate() {
             *byte = ((me_bits >> (8 * (6 - i))) & 0xFF) as u8;
@@ -664,10 +653,10 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, StateEvent::Acquired(i) if *i == icao)));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, StateEvent::Identification { icao: i, callsign }
-                              if *i == icao && callsign.as_str() == "TEST1234")));
+        assert!(events.iter().any(
+            |e| matches!(e, StateEvent::Identification { icao: i, callsign }
+                              if *i == icao && callsign.as_str() == "TEST1234")
+        ));
         let ac = tracker.get(icao).expect("aircraft tracked");
         assert_eq!(ac.callsign.unwrap().as_str(), "TEST1234");
         assert_eq!(ac.counters.messages_total, 1);
@@ -686,9 +675,7 @@ mod tests {
         tracker.ingest(&frame, t0, &mut events);
         events.clear();
         tracker.ingest(&frame, t0 + Duration::from_millis(100), &mut events);
-        assert!(!events
-            .iter()
-            .any(|e| matches!(e, StateEvent::Acquired(_))));
+        assert!(!events.iter().any(|e| matches!(e, StateEvent::Acquired(_))));
         // Identification didn't change ⇒ no second Identification event.
         assert!(!events
             .iter()
@@ -719,20 +706,25 @@ mod tests {
         let pos_evt = events
             .iter()
             .find_map(|e| match e {
-                StateEvent::Position { icao: i, pos, source, .. } if *i == icao => {
-                    Some((*pos, *source))
-                }
+                StateEvent::Position {
+                    icao: i,
+                    pos,
+                    source,
+                    ..
+                } if *i == icao => Some((*pos, *source)),
                 _ => None,
             })
             .expect("position event emitted");
         assert_eq!(pos_evt.1, PositionSource::Global);
         assert!(
             (pos_evt.0.lat_deg - 52.2572).abs() < 1e-3,
-            "lat {} not near 52.2572", pos_evt.0.lat_deg
+            "lat {} not near 52.2572",
+            pos_evt.0.lat_deg
         );
         assert!(
             (pos_evt.0.lon_deg - 3.919_37).abs() < 1e-3,
-            "lon {} not near 3.91937", pos_evt.0.lon_deg
+            "lon {} not near 3.91937",
+            pos_evt.0.lon_deg
         );
     }
 
@@ -770,16 +762,22 @@ mod tests {
 
         let mut tracker = StateTracker::new();
         // Reference within ~1° of the true position so local decode works.
-        tracker.set_reference(LatLon { lat_deg: 52.0, lon_deg: 4.0 });
+        tracker.set_reference(LatLon {
+            lat_deg: 52.0,
+            lon_deg: 4.0,
+        });
         let mut events = Vec::new();
         tracker.ingest(&frame, Instant::now(), &mut events);
 
         let (pos, source) = events
             .iter()
             .find_map(|e| match e {
-                StateEvent::Position { icao: i, pos, source, .. } if *i == icao => {
-                    Some((*pos, *source))
-                }
+                StateEvent::Position {
+                    icao: i,
+                    pos,
+                    source,
+                    ..
+                } if *i == icao => Some((*pos, *source)),
                 _ => None,
             })
             .expect("local position event emitted");
@@ -836,10 +834,15 @@ mod tests {
         let icao1 = Icao::from_bytes([0, 0, 1]);
         let icao2 = Icao::from_bytes([0, 0, 2]);
         assert!(
-            events.iter().any(|e| matches!(e, StateEvent::Lost(i) if *i == icao2)),
+            events
+                .iter()
+                .any(|e| matches!(e, StateEvent::Lost(i) if *i == icao2)),
             "f2 should be evicted (it became oldest after f1 was touched)",
         );
-        assert!(tracker.get(icao1).is_some(), "f1 should survive — it was touched");
+        assert!(
+            tracker.get(icao1).is_some(),
+            "f1 should survive — it was touched"
+        );
         assert!(tracker.get(icao2).is_none(), "f2 should be gone");
     }
 
@@ -854,9 +857,7 @@ mod tests {
         events.clear();
 
         tracker.evict_stale(t0 + STALE_AFTER + Duration::from_secs(1), &mut events);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, StateEvent::Lost(_))));
+        assert!(events.iter().any(|e| matches!(e, StateEvent::Lost(_))));
         assert!(tracker.is_empty());
     }
 
@@ -874,8 +875,7 @@ mod tests {
         data[0] = 4u8 << 3 | (payload[0] & 0x07);
         data[1..4].copy_from_slice(&payload[1..4]);
         let crc_val = crc::crc24(&data);
-        let icao_val =
-            (u32::from(icao[0]) << 16) | (u32::from(icao[1]) << 8) | u32::from(icao[2]);
+        let icao_val = (u32::from(icao[0]) << 16) | (u32::from(icao[1]) << 8) | u32::from(icao[2]);
         let xored = crc_val ^ icao_val;
         let mut f = [0u8; 7];
         f[..4].copy_from_slice(&data);
@@ -908,10 +908,13 @@ mod tests {
 
         tracker.ingest(&frame, t0 + Duration::from_secs(1), &mut events);
         let icao = Icao::from_bytes([0xA2, 0x4A, 0xA8]);
-        assert!(events.iter().any(|e| matches!(
-            e,
-            StateEvent::AddressRecovered { icao: i, .. } if *i == icao
-        )), "expected AddressRecovered event, got {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                StateEvent::AddressRecovered { icao: i, .. } if *i == icao
+            )),
+            "expected AddressRecovered event, got {events:?}"
+        );
         let ac = tracker.get(icao).expect("still tracked");
         assert_eq!(ac.counters.crc_address_recovered, 1);
         assert_eq!(ac.counters.messages_total, 2);
@@ -927,7 +930,9 @@ mod tests {
         let mut events = Vec::new();
         tracker.ingest(&frame, Instant::now(), &mut events);
         assert!(tracker.is_empty(), "no aircraft should be invented");
-        assert!(events.iter().any(|e| matches!(e, StateEvent::Orphan { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StateEvent::Orphan { .. })));
     }
 
     #[test]
@@ -946,6 +951,8 @@ mod tests {
         let frame = frame_from_bytes(&df4);
         let too_late = t0 + ACTIVE_ICAO_WINDOW + Duration::from_secs(1);
         tracker.ingest(&frame, too_late, &mut events);
-        assert!(events.iter().any(|e| matches!(e, StateEvent::Orphan { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StateEvent::Orphan { .. })));
     }
 }

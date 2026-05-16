@@ -37,11 +37,7 @@ pub fn router(state: AppState) -> Router {
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
 async fn index() -> Response {
-    (
-        [("content-type", "text/html; charset=utf-8")],
-        INDEX_HTML,
-    )
-        .into_response()
+    ([("content-type", "text/html; charset=utf-8")], INDEX_HTML).into_response()
 }
 
 /// Returns 200 OK / `"ok"` while the decoder thread is alive, 503
@@ -53,11 +49,7 @@ async fn healthz(State(state): State<AppState>) -> Response {
     if state.decoder_alive.load(Ordering::Acquire) {
         (axum::http::StatusCode::OK, "ok").into_response()
     } else {
-        (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "decoder dead",
-        )
-            .into_response()
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "decoder dead").into_response()
     }
 }
 
@@ -73,12 +65,13 @@ async fn list_aircraft(State(state): State<AppState>) -> Json<Vec<AircraftSnapsh
     Json(out)
 }
 
-async fn get_aircraft(
-    State(state): State<AppState>,
-    Path(icao_hex): Path<String>,
-) -> Response {
+async fn get_aircraft(State(state): State<AppState>, Path(icao_hex): Path<String>) -> Response {
     let Some(icao) = Icao::from_hex(&icao_hex) else {
-        return (axum::http::StatusCode::BAD_REQUEST, "icao must be 6 hex digits").into_response();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "icao must be 6 hex digits",
+        )
+            .into_response();
     };
     let snap = {
         let map = state.snapshot.read().expect("snapshot lock poisoned");
@@ -175,4 +168,3 @@ fn envelope_to_sse(env: EventEnvelope) -> Result<SseEvent, Infallible> {
         .event(env.event.tag())
         .data(data))
 }
-

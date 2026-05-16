@@ -130,10 +130,7 @@ fn single_bit_correction(syndrome: u32, n: usize) -> Option<u16> {
     // worst and is only invoked on CRC failure, not the hot path. A sorted
     // table with binary search would be 2-3x faster but the gain is in the
     // noise next to the rest of the decode budget.
-    table
-        .iter()
-        .position(|&s| s == syndrome)
-        .map(|i| i as u16)
+    table.iter().position(|&s| s == syndrome).map(|i| i as u16)
 }
 
 // --- Tables ------------------------------------------------------------------

@@ -19,9 +19,7 @@ use clap::{Parser, Subcommand};
 
 use rs1090::cpr::LatLon;
 use rs1090::frame::{Frame, FrameDetector};
-use rs1090::message::{
-    self, Altitude, Message, SquitterPayload, Velocity, VelocityKind,
-};
+use rs1090::message::{self, Altitude, Message, SquitterPayload, Velocity, VelocityKind};
 use rs1090::source::{IqFileSource, SampleSource};
 use rs1090::state::{StateEvent, StateTracker};
 use rs1090::Iq;
@@ -107,8 +105,14 @@ fn parse_latlon(s: &str) -> std::result::Result<LatLon, String> {
     let (lat, lon) = s
         .split_once(',')
         .ok_or_else(|| format!("expected `lat,lon`, got `{s}`"))?;
-    let lat_deg: f64 = lat.trim().parse().map_err(|e| format!("bad latitude: {e}"))?;
-    let lon_deg: f64 = lon.trim().parse().map_err(|e| format!("bad longitude: {e}"))?;
+    let lat_deg: f64 = lat
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad latitude: {e}"))?;
+    let lon_deg: f64 = lon
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad longitude: {e}"))?;
     if !(-90.0..=90.0).contains(&lat_deg) || !(-180.0..=180.0).contains(&lon_deg) {
         return Err(format!("out of range: {lat_deg},{lon_deg}"));
     }
@@ -163,8 +167,8 @@ fn main() -> Result<()> {
 }
 
 fn run_replay(args: &ReplayArgs) -> Result<()> {
-    let file = File::open(&args.file)
-        .with_context(|| format!("opening {}", args.file.display()))?;
+    let file =
+        File::open(&args.file).with_context(|| format!("opening {}", args.file.display()))?;
     let reader = BufReader::new(file);
     let mut source = IqFileSource::new(reader, args.sample_rate, args.center_freq);
 
@@ -229,14 +233,20 @@ fn print_message_summary<W: Write>(out: &mut W, msg: &Message) -> io::Result<()>
             write!(out, "ICAO={} ", es.icao)?;
             match &es.payload {
                 SquitterPayload::Identification(id) => {
-                    write!(out, "ident callsign={} cat={}/{}",
-                        id.callsign, id.category_set, id.category)?;
+                    write!(
+                        out,
+                        "ident callsign={} cat={}/{}",
+                        id.callsign, id.category_set, id.category
+                    )?;
                 }
                 SquitterPayload::AirbornePosition(p) => {
-                    write!(out, "airpos {} cpr-{}({},{})",
+                    write!(
+                        out,
+                        "airpos {} cpr-{}({},{})",
                         fmt_altitude(p.altitude),
                         if p.cpr.odd { "odd" } else { "even" },
-                        p.cpr.lat_cpr, p.cpr.lon_cpr,
+                        p.cpr.lat_cpr,
+                        p.cpr.lon_cpr,
                     )?;
                 }
                 SquitterPayload::Velocity(v) => print_velocity_summary(out, v)?,
@@ -274,10 +284,17 @@ fn fmt_altitude(a: Altitude) -> String {
 
 fn print_velocity_summary<W: Write>(out: &mut W, v: &Velocity) -> io::Result<()> {
     match &v.kind {
-        VelocityKind::Ground { speed_kt, heading_deg } => {
+        VelocityKind::Ground {
+            speed_kt,
+            heading_deg,
+        } => {
             write!(out, "vel gs={speed_kt}kt hdg={heading_deg:.1}°")?;
         }
-        VelocityKind::Airspeed { speed_kt, heading_deg, magnetic } => {
+        VelocityKind::Airspeed {
+            speed_kt,
+            heading_deg,
+            magnetic,
+        } => {
             write!(out, "vel ias={speed_kt}kt")?;
             if let Some(h) = heading_deg {
                 let label = if *magnetic { "mag" } else { "true" };
@@ -294,8 +311,8 @@ fn print_velocity_summary<W: Write>(out: &mut W, v: &Velocity) -> io::Result<()>
 // --- `track` subcommand ----------------------------------------------------
 
 fn run_track(args: &TrackArgs) -> Result<()> {
-    let file = File::open(&args.file)
-        .with_context(|| format!("opening {}", args.file.display()))?;
+    let file =
+        File::open(&args.file).with_context(|| format!("opening {}", args.file.display()))?;
     let reader = BufReader::new(file);
     let mut source = IqFileSource::new(reader, args.sample_rate, args.center_freq);
 
@@ -334,9 +351,7 @@ fn run_track(args: &TrackArgs) -> Result<()> {
         // stale than they really are), which is the safe direction.
         samples_consumed += n as u64;
         let virtual_now = t0
-            + Duration::from_nanos(
-                samples_consumed * 1_000_000_000 / u64::from(args.sample_rate),
-            );
+            + Duration::from_nanos(samples_consumed * 1_000_000_000 / u64::from(args.sample_rate));
 
         detector.process(&buf[..n], |frame| {
             tracker.ingest(frame, virtual_now, &mut events_buf);
@@ -346,8 +361,8 @@ fn run_track(args: &TrackArgs) -> Result<()> {
         });
     }
     // Final eviction pass.
-    let final_now = t0
-        + Duration::from_nanos(samples_consumed * 1_000_000_000 / u64::from(args.sample_rate));
+    let final_now =
+        t0 + Duration::from_nanos(samples_consumed * 1_000_000_000 / u64::from(args.sample_rate));
     tracker.evict_stale(final_now, &mut events_buf);
     for event in events_buf.drain(..) {
         let _ = print_state_event(&mut out, &event);
@@ -396,12 +411,20 @@ fn print_state_event<W: Write>(out: &mut W, event: &StateEvent) -> io::Result<()
         StateEvent::Identification { icao, callsign } => {
             writeln!(out, "ident   {icao} callsign={callsign}")?;
         }
-        StateEvent::Position { icao, pos, altitude, source } => {
+        StateEvent::Position {
+            icao,
+            pos,
+            altitude,
+            source,
+        } => {
             // 6-wide column-aligned tag so adjacent lines line up.
             writeln!(
                 out,
                 "pos     {icao} {:.4},{:.4} {} ({:<6})",
-                pos.lat_deg, pos.lon_deg, fmt_altitude(*altitude), source.wire_tag(),
+                pos.lat_deg,
+                pos.lon_deg,
+                fmt_altitude(*altitude),
+                source.wire_tag(),
             )?;
         }
         StateEvent::Velocity { icao, velocity } => {
@@ -527,5 +550,3 @@ fn run_live(args: &LiveArgs) -> Result<()> {
     );
     Ok(())
 }
-
-

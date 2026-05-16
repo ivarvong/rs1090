@@ -133,7 +133,10 @@ impl DownlinkFormat {
     #[inline]
     #[must_use]
     pub const fn has_clean_crc(self) -> bool {
-        matches!(self, Self::AllCallReply | Self::ExtendedSquitter | Self::TisB)
+        matches!(
+            self,
+            Self::AllCallReply | Self::ExtendedSquitter | Self::TisB
+        )
     }
 }
 
@@ -228,7 +231,13 @@ impl Frame {
         };
         // bytes.len() is asserted to be 7 or 14, both well within u8.
         let len = bytes.len() as u8;
-        Self { bytes: buf, len, df, crc, confidence: u8::MAX }
+        Self {
+            bytes: buf,
+            len,
+            df,
+            crc,
+            confidence: u8::MAX,
+        }
     }
 }
 
@@ -286,8 +295,7 @@ const SHORT_FRAME_BITS: usize = SHORT_FRAME_BYTES * 8;
 /// we need to even *try* to read a preamble plus its 5-bit DF prefix; if the
 /// DF resolves to a long frame and we don't have enough buffer, we break out
 /// and the carry-over picks up the trail on the next call.
-const MIN_DETECTION_WINDOW: usize =
-    PREAMBLE_SAMPLES + SHORT_FRAME_BITS * SAMPLES_PER_BIT;
+const MIN_DETECTION_WINDOW: usize = PREAMBLE_SAMPLES + SHORT_FRAME_BITS * SAMPLES_PER_BIT;
 
 impl Default for FrameDetector {
     fn default() -> Self {
@@ -520,8 +528,14 @@ mod tests {
     #[test]
     fn frame_length_follows_df_high_bit() {
         assert_eq!(DownlinkFormat::ShortAcas.frame_bytes(), SHORT_FRAME_BYTES);
-        assert_eq!(DownlinkFormat::AllCallReply.frame_bytes(), SHORT_FRAME_BYTES);
-        assert_eq!(DownlinkFormat::ExtendedSquitter.frame_bytes(), LONG_FRAME_BYTES);
+        assert_eq!(
+            DownlinkFormat::AllCallReply.frame_bytes(),
+            SHORT_FRAME_BYTES
+        );
+        assert_eq!(
+            DownlinkFormat::ExtendedSquitter.frame_bytes(),
+            LONG_FRAME_BYTES
+        );
         assert_eq!(DownlinkFormat::LongAcas.frame_bytes(), LONG_FRAME_BYTES);
         // Reserved DFs follow the same bit-16 rule:
         assert_eq!(DownlinkFormat::Reserved(6).frame_bytes(), SHORT_FRAME_BYTES);
@@ -564,7 +578,11 @@ mod tests {
         frame[LONG_FRAME_BYTES - 3] = ((crc_val >> 16) & 0xFF) as u8;
         frame[LONG_FRAME_BYTES - 2] = ((crc_val >> 8) & 0xFF) as u8;
         frame[LONG_FRAME_BYTES - 1] = (crc_val & 0xFF) as u8;
-        debug_assert_eq!(crc::crc24(&frame), 0, "synth frame should have zero syndrome");
+        debug_assert_eq!(
+            crc::crc24(&frame),
+            0,
+            "synth frame should have zero syndrome"
+        );
         frame
     }
 
@@ -579,8 +597,8 @@ mod tests {
     ) -> alloc::vec::Vec<u16> {
         let payload_bits = frame_bytes.len() * 8;
         let payload_samples = payload_bits * SAMPLES_PER_BIT;
-        let total = leading_noise_samples + PREAMBLE_SAMPLES + payload_samples
-            + trailing_noise_samples;
+        let total =
+            leading_noise_samples + PREAMBLE_SAMPLES + payload_samples + trailing_noise_samples;
         let mut out = alloc::vec![floor; total];
 
         // Preamble.

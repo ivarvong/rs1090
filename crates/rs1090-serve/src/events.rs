@@ -166,10 +166,7 @@ fn ser_icao<S: serde::Serializer>(icao: &Icao, s: S) -> Result<S::Ok, S::Error> 
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn ser_position_source<S: serde::Serializer>(
-    p: &PositionSource,
-    s: S,
-) -> Result<S::Ok, S::Error> {
+fn ser_position_source<S: serde::Serializer>(p: &PositionSource, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(p.wire_tag())
 }
 
@@ -195,18 +192,21 @@ pub fn from_state_event(ev: &StateEvent, now_iso: &str) -> Option<Event> {
                 callsign: callsign.to_string(),
             })
         }
-        StateEvent::Position { icao, pos, altitude, source } => {
-            Event::Position(AircraftPosition {
-                v: 1,
-                t: t(),
-                icao: *icao,
-                lat: pos.lat_deg,
-                lon: pos.lon_deg,
-                alt_ft: altitude.feet(),
-                alt_source: altitude.source_tag(),
-                source: *source,
-            })
-        }
+        StateEvent::Position {
+            icao,
+            pos,
+            altitude,
+            source,
+        } => Event::Position(AircraftPosition {
+            v: 1,
+            t: t(),
+            icao: *icao,
+            lat: pos.lat_deg,
+            lon: pos.lon_deg,
+            alt_ft: altitude.feet(),
+            alt_source: altitude.source_tag(),
+            source: *source,
+        }),
         StateEvent::Velocity { icao, velocity } => {
             Event::Velocity(velocity_to_wire(*icao, *velocity, &t()))
         }
@@ -306,8 +306,6 @@ pub struct SnapshotPosition {
     #[serde(serialize_with = "ser_position_source")]
     pub source: PositionSource,
 }
-
-
 
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]

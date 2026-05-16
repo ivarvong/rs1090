@@ -1,0 +1,67 @@
+# Continuous integration: every push and pull request runs the same
+# checks the local hooks enforce — `cargo test`, `cargo clippy`, and
+# `cargo fmt`. The MSRV is pinned in `rust-version = "1.85"` at the
+# workspace level; we install that toolchain explicitly so a drift in
+# the locked dependencies that requires a newer compiler is caught
+# here rather than at a user's checkout.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `stable` proves we keep pace with the current compiler.
+        # The MSRV row catches accidental use of features added in a
+        # newer release — if this fails the fix is to either bump
+        # `rust-version` in Cargo.toml (and explain why) or drop the
+        # new API.
+        toolchain: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace
+        # `--no-default-features` would isolate the `no_std` slice of
+        # `rs1090`, but `rs1090-cli` and `rs1090-serve` need `std`;
+        # default features cover the actual deploy targets. Live RTL
+        # path is gated on the `rtl-sdr` feature which we exclude here
+        # since CI has no USB device.
+        run: cargo test --workspace --no-default-features --features std
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --no-default-features --features std -- -D warnings
+
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check

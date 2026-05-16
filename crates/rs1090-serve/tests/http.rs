@@ -94,12 +94,7 @@ fn spawn_serve(iq_path: &std::path::Path, port: u16) -> Child {
     let bin = env!("CARGO_BIN_EXE_rs1090-serve");
     let bind = format!("127.0.0.1:{port}");
     let mut child = Command::new(bin)
-        .args([
-            "--bind",
-            &bind,
-            "file",
-            iq_path.to_str().unwrap(),
-        ])
+        .args(["--bind", &bind, "file", iq_path.to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -169,8 +164,7 @@ fn http_endpoints_serve_decoded_state() {
     let mut body = String::new();
     for _ in 0..50 {
         thread::sleep(Duration::from_millis(100));
-        body = ureq_get(&format!("http://127.0.0.1:{port}/aircraft"))
-            .expect("aircraft");
+        body = ureq_get(&format!("http://127.0.0.1:{port}/aircraft")).expect("aircraft");
         if body.contains("A1B2C3") {
             break;
         }
@@ -198,8 +192,7 @@ fn http_endpoints_serve_decoded_state() {
     // /aircraft/ZZZZZZ → 400
     // (our minimal client doesn't surface status codes, so just check the
     // body looks like an error string)
-    let body = ureq_get(&format!("http://127.0.0.1:{port}/aircraft/ZZZZZZ"))
-        .unwrap_or_default();
+    let body = ureq_get(&format!("http://127.0.0.1:{port}/aircraft/ZZZZZZ")).unwrap_or_default();
     assert!(
         body.contains("icao") || body.is_empty(),
         "expected error body, got: {body}",

@@ -80,8 +80,14 @@ fn parse_latlon(s: &str) -> std::result::Result<LatLon, String> {
     let (lat, lon) = s
         .split_once(',')
         .ok_or_else(|| format!("expected `lat,lon`, got `{s}`"))?;
-    let lat_deg: f64 = lat.trim().parse().map_err(|e| format!("bad latitude: {e}"))?;
-    let lon_deg: f64 = lon.trim().parse().map_err(|e| format!("bad longitude: {e}"))?;
+    let lat_deg: f64 = lat
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad latitude: {e}"))?;
+    let lon_deg: f64 = lon
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad longitude: {e}"))?;
     if !(-90.0..=90.0).contains(&lat_deg) || !(-180.0..=180.0).contains(&lon_deg) {
         return Err(format!("out of range: {lat_deg},{lon_deg}"));
     }
@@ -94,7 +100,10 @@ fn main() -> Result<()> {
     let bind = cli.bind.clone();
 
     // Warn loudly when bound publicly per DESIGN.md §12.8.
-    if !bind.starts_with("127.0.0.1") && !bind.starts_with("localhost") && !bind.starts_with("[::1]") {
+    if !bind.starts_with("127.0.0.1")
+        && !bind.starts_with("localhost")
+        && !bind.starts_with("[::1]")
+    {
         eprintln!(
             "rs1090-serve: WARNING — binding to a non-loopback address ({bind}). \
              No auth is configured. Front with a reverse proxy for TLS + auth."
@@ -123,8 +132,7 @@ fn main() -> Result<()> {
             impl Drop for LivenessGuard {
                 fn drop(&mut self) {
                     if self.armed {
-                        self.flag
-                            .store(false, std::sync::atomic::Ordering::Release);
+                        self.flag.store(false, std::sync::atomic::Ordering::Release);
                     }
                 }
             }
@@ -148,9 +156,9 @@ fn main() -> Result<()> {
         .context("building tokio runtime")?;
 
     rt.block_on(async move {
-        let listener = tokio::net::TcpListener::bind(&bind).await.with_context(|| {
-            format!("binding {bind}")
-        })?;
+        let listener = tokio::net::TcpListener::bind(&bind)
+            .await
+            .with_context(|| format!("binding {bind}"))?;
         eprintln!("rs1090-serve: listening on {bind}");
         eprintln!("    curl http://{bind}/healthz");
         eprintln!("    curl http://{bind}/aircraft");
@@ -205,19 +213,16 @@ fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
         // For file replay with --realtime, pace the read loop so the SSE
         // stream emits at the rate the samples were captured at.
         if realtime {
-            let wall_target = Duration::from_nanos(
-                samples_consumed * 1_000_000_000 / u64::from(sample_rate),
-            );
+            let wall_target =
+                Duration::from_nanos(samples_consumed * 1_000_000_000 / u64::from(sample_rate));
             let wall_actual = t0.elapsed();
             if let Some(sleep_for) = wall_target.checked_sub(wall_actual) {
                 std::thread::sleep(sleep_for);
             }
         }
 
-        let virtual_now = t0
-            + Duration::from_nanos(
-                samples_consumed * 1_000_000_000 / u64::from(sample_rate),
-            );
+        let virtual_now =
+            t0 + Duration::from_nanos(samples_consumed * 1_000_000_000 / u64::from(sample_rate));
 
         let tx = state.broadcaster.clone();
         let snapshot = state.snapshot.clone();

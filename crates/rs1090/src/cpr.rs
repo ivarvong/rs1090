@@ -319,7 +319,10 @@ pub fn global_decode(
     };
     let lon = wrap_lon(lon);
 
-    Ok(LatLon { lat_deg: lat, lon_deg: lon })
+    Ok(LatLon {
+        lat_deg: lat,
+        lon_deg: lon,
+    })
 }
 
 // --- Local decode -----------------------------------------------------------
@@ -351,7 +354,10 @@ pub fn local_decode(msg: CprPosition, reference: LatLon) -> LatLon {
     let lon = dlon * (m as f64 + xz);
     let lon = wrap_lon(lon);
 
-    LatLon { lat_deg: lat, lon_deg: lon }
+    LatLon {
+        lat_deg: lat,
+        lon_deg: lon,
+    }
 }
 
 // --- Wrapping ---------------------------------------------------------------
@@ -390,14 +396,14 @@ mod tests {
         // The full-sweep `nl_formula_and_table_agree_across_the_globe`
         // test catches off-by-one slips at band boundaries.
         for &(lat, expected) in &[
-            (0.0, 59u32),    // equator
-            (12.0, 58),      // band (10.470, 14.828)
-            (20.0, 56),      // band (18.186, 21.029)
-            (45.0, 42),      // mid-latitudes
-            (60.0, 29),      // band (59.955, 61.049)
-            (74.0, 16),      // band (73.452, 74.439)
-            (87.5, 1),       // polar
-            (-45.0, 42),     // southern symmetry
+            (0.0, 59u32), // equator
+            (12.0, 58),   // band (10.470, 14.828)
+            (20.0, 56),   // band (18.186, 21.029)
+            (45.0, 42),   // mid-latitudes
+            (60.0, 29),   // band (59.955, 61.049)
+            (74.0, 16),   // band (73.452, 74.439)
+            (87.5, 1),    // polar
+            (-45.0, 42),  // southern symmetry
         ] {
             assert_eq!(nl(lat), expected, "nl({lat}) mismatch");
         }
@@ -434,7 +440,8 @@ mod tests {
     /// in the test module on purpose.
     fn encode(pos: LatLon, odd: bool) -> CprPosition {
         let dlat = d_lat(odd);
-        let yz = ((pos.lat_deg / dlat) - cpr_floor(pos.lat_deg / dlat) as f64) * f64::from(1u32 << 17);
+        let yz =
+            ((pos.lat_deg / dlat) - cpr_floor(pos.lat_deg / dlat) as f64) * f64::from(1u32 << 17);
         let lat_cpr = (yz.round() as i64).rem_euclid(1 << 17) as u32;
         // Use the *encoded* latitude to recompute NL — this matches the
         // ground-truth quantization a transmitter does.
@@ -444,9 +451,14 @@ mod tests {
         let nl_v = nl(lat_round);
         let dlon = d_lon(nl_v, odd);
         let _ = nz;
-        let xz = ((pos.lon_deg / dlon) - cpr_floor(pos.lon_deg / dlon) as f64) * f64::from(1u32 << 17);
+        let xz =
+            ((pos.lon_deg / dlon) - cpr_floor(pos.lon_deg / dlon) as f64) * f64::from(1u32 << 17);
         let lon_cpr = (xz.round() as i64).rem_euclid(1 << 17) as u32;
-        CprPosition { lat_cpr, lon_cpr, odd }
+        CprPosition {
+            lat_cpr,
+            lon_cpr,
+            odd,
+        }
     }
 
     fn close(a: f64, b: f64, eps: f64) -> bool {
@@ -474,18 +486,28 @@ mod tests {
         let p = global_decode(even, odd, false).expect("decode");
         assert!(
             close(p.lat_deg, 52.2572, 1e-3),
-            "lat {} not near 52.2572", p.lat_deg
+            "lat {} not near 52.2572",
+            p.lat_deg
         );
         assert!(
             close(p.lon_deg, 3.919_37, 1e-3),
-            "lon {} not near 3.91937", p.lon_deg
+            "lon {} not near 3.91937",
+            p.lon_deg
         );
     }
 
     #[test]
     fn global_decode_rejects_parity_mismatch() {
-        let a = CprPosition { lat_cpr: 0, lon_cpr: 0, odd: false };
-        let b = CprPosition { lat_cpr: 0, lon_cpr: 0, odd: false };
+        let a = CprPosition {
+            lat_cpr: 0,
+            lon_cpr: 0,
+            odd: false,
+        };
+        let b = CprPosition {
+            lat_cpr: 0,
+            lon_cpr: 0,
+            odd: false,
+        };
         assert_eq!(global_decode(a, b, false), Err(CprError::ParityMismatch));
     }
 
@@ -501,7 +523,10 @@ mod tests {
             (1.3644, 103.9915),   // Singapore (near equator)
             (78.2486, 15.4658),   // Svalbard (high latitude)
         ] {
-            let pos = LatLon { lat_deg: lat, lon_deg: lon };
+            let pos = LatLon {
+                lat_deg: lat,
+                lon_deg: lon,
+            };
             let e = encode(pos, false);
             let o = encode(pos, true);
             let decoded = global_decode(e, o, true).expect("decode failed");
@@ -526,17 +551,27 @@ mod tests {
     fn local_decode_recovers_nearby_position() {
         // Reference 1 km from the true position, single odd message,
         // expect accurate recovery.
-        let true_pos = LatLon { lat_deg: 40.6413, lon_deg: -73.7781 };
-        let reference = LatLon { lat_deg: 40.6500, lon_deg: -73.7500 };
+        let true_pos = LatLon {
+            lat_deg: 40.6413,
+            lon_deg: -73.7781,
+        };
+        let reference = LatLon {
+            lat_deg: 40.6500,
+            lon_deg: -73.7500,
+        };
         let msg = encode(true_pos, true);
         let got = local_decode(msg, reference);
         assert!(
             (got.lat_deg - true_pos.lat_deg).abs() < 1e-3,
-            "lat off: {} vs {}", got.lat_deg, true_pos.lat_deg
+            "lat off: {} vs {}",
+            got.lat_deg,
+            true_pos.lat_deg
         );
         assert!(
             (got.lon_deg - true_pos.lon_deg).abs() < 1e-3,
-            "lon off: {} vs {}", got.lon_deg, true_pos.lon_deg
+            "lon off: {} vs {}",
+            got.lon_deg,
+            true_pos.lon_deg
         );
     }
 
@@ -547,8 +582,14 @@ mod tests {
         // not near the aircraft. This is not an error — it's the math.
         // The state-tracker layer must gate which references are
         // legitimate before calling this function.
-        let true_pos = LatLon { lat_deg: 40.6413, lon_deg: -73.7781 };
-        let reference = LatLon { lat_deg: 0.0, lon_deg: 0.0 };
+        let true_pos = LatLon {
+            lat_deg: 40.6413,
+            lon_deg: -73.7781,
+        };
+        let reference = LatLon {
+            lat_deg: 0.0,
+            lon_deg: 0.0,
+        };
         let msg = encode(true_pos, false);
         let got = local_decode(msg, reference);
         // The returned point is far from the true position; pinned so a
