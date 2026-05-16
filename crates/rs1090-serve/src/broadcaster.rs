@@ -21,6 +21,7 @@
 //!   `RecvError::Lagged(n)` so they know how many they missed.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::broadcast;
@@ -42,6 +43,13 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 pub struct AppState {
     pub broadcaster: broadcast::Sender<EventEnvelope>,
     pub snapshot: Arc<RwLock<HashMap<Icao, AircraftSnapshot>>>,
+    /// Set to `true` while the decoder thread is running. The thread
+    /// flips this to `false` on any exit path — clean return, error
+    /// return, or panic unwind — via a `Drop` guard installed at the
+    /// top of its body. `/healthz` returns 503 once this goes false,
+    /// so a wedged decoder is detectable by load balancers and
+    /// monitoring without polling the snapshot for liveness.
+    pub decoder_alive: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -50,6 +58,7 @@ impl AppState {
         Self {
             broadcaster: tx,
             snapshot: Arc::new(RwLock::new(HashMap::new())),
+            decoder_alive: Arc::new(AtomicBool::new(true)),
         }
     }
 }

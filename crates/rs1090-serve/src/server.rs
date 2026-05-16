@@ -44,8 +44,21 @@ async fn index() -> Response {
         .into_response()
 }
 
-async fn healthz() -> &'static str {
-    "ok"
+/// Returns 200 OK / `"ok"` while the decoder thread is alive, 503
+/// `"decoder dead"` once it has exited (clean, error, or panic). Load
+/// balancers and uptime monitors can therefore detect a wedged process
+/// without needing to scrape the snapshot for staleness heuristics.
+async fn healthz(State(state): State<AppState>) -> Response {
+    use std::sync::atomic::Ordering;
+    if state.decoder_alive.load(Ordering::Acquire) {
+        (axum::http::StatusCode::OK, "ok").into_response()
+    } else {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "decoder dead",
+        )
+            .into_response()
+    }
 }
 
 async fn list_aircraft(State(state): State<AppState>) -> Json<Vec<AircraftSnapshot>> {

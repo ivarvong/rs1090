@@ -103,13 +103,38 @@ fn main() -> Result<()> {
 
     // Spawn the decoder in a sync OS thread (per DESIGN.md §12.6) so it
     // never awaits anything. It pushes into the broadcaster from there.
+    //
+    // `decoder_alive` is wired via a disarm-able Drop guard:
+    //   - Decoder returns `Err(_)`  → guard fires → flag goes false.
+    //   - Decoder panics            → guard fires on unwind → flag false.
+    //   - Decoder returns `Ok(())`  → guard disarmed → flag stays true.
+    //     File replay finishing normally is not a failure; the server
+    //     keeps serving the final snapshot until Ctrl-C, and `/healthz`
+    //     stays green.
     let decoder_state = state.clone();
     let decoder_args = cli;
     std::thread::Builder::new()
         .name("decoder".into())
         .spawn(move || {
-            if let Err(e) = run_decoder(decoder_args, decoder_state) {
-                eprintln!("rs1090-serve: decoder error: {e:#}");
+            struct LivenessGuard {
+                flag: Arc<std::sync::atomic::AtomicBool>,
+                armed: bool,
+            }
+            impl Drop for LivenessGuard {
+                fn drop(&mut self) {
+                    if self.armed {
+                        self.flag
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    }
+                }
+            }
+            let mut guard = LivenessGuard {
+                flag: decoder_state.decoder_alive.clone(),
+                armed: true,
+            };
+            match run_decoder(decoder_args, decoder_state.clone()) {
+                Ok(()) => guard.armed = false,
+                Err(e) => eprintln!("rs1090-serve: decoder error: {e:#}"),
             }
         })
         .context("spawning decoder thread")?;
