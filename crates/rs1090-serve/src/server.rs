@@ -91,6 +91,63 @@ struct StreamParams {
     r#type: Option<String>,
     /// Optional comma-separated ICAO addresses (hex, no separators).
     icao: Option<String>,
+    /// Geographic bounding box: `min_lat,min_lon,max_lat,max_lon` in
+    /// decimal degrees. Events are passed only when the aircraft's
+    /// current known position falls inside this box. Aircraft without
+    /// a resolved position are filtered out for the lifetime of this
+    /// subscription, even on their non-position events (acquired,
+    /// velocity, etc.) — that's the price of a meaningful bbox.
+    bbox: Option<String>,
+    /// Lower altitude bound in feet, inclusive. Aircraft below this
+    /// altitude (or with no known altitude) are filtered out.
+    alt_min: Option<i32>,
+    /// Upper altitude bound in feet, inclusive.
+    alt_max: Option<i32>,
+}
+
+/// Parsed bounding box in `(min_lat, min_lon, max_lat, max_lon)` order.
+#[derive(Debug, Clone, Copy)]
+struct Bbox {
+    min_lat: f64,
+    min_lon: f64,
+    max_lat: f64,
+    max_lon: f64,
+}
+
+impl Bbox {
+    /// Parse from `"min_lat,min_lon,max_lat,max_lon"`. Returns `None`
+    /// for malformed input, out-of-range coordinates, or boxes where
+    /// `max <= min` on either axis. Antimeridian-wrapping boxes
+    /// (e.g. spanning ±180°) are deliberately not supported in v0.1.
+    fn parse(s: &str) -> Option<Self> {
+        let mut parts = s.split(',');
+        let min_lat: f64 = parts.next()?.trim().parse().ok()?;
+        let min_lon: f64 = parts.next()?.trim().parse().ok()?;
+        let max_lat: f64 = parts.next()?.trim().parse().ok()?;
+        let max_lon: f64 = parts.next()?.trim().parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        if !(-90.0..=90.0).contains(&min_lat) || !(-90.0..=90.0).contains(&max_lat) {
+            return None;
+        }
+        if !(-180.0..=180.0).contains(&min_lon) || !(-180.0..=180.0).contains(&max_lon) {
+            return None;
+        }
+        if max_lat <= min_lat || max_lon <= min_lon {
+            return None;
+        }
+        Some(Self {
+            min_lat,
+            min_lon,
+            max_lat,
+            max_lon,
+        })
+    }
+
+    fn contains(&self, lat: f64, lon: f64) -> bool {
+        lat >= self.min_lat && lat <= self.max_lat && lon >= self.min_lon && lon <= self.max_lon
+    }
 }
 
 async fn stream(
@@ -113,6 +170,15 @@ async fn stream(
             .filter_map(|tok| Icao::from_hex(tok.trim()))
             .collect()
     });
+
+    let bbox_filter: Option<Bbox> = params.bbox.as_deref().and_then(Bbox::parse);
+    let alt_min = params.alt_min;
+    let alt_max = params.alt_max;
+    // We need the snapshot inside the filter closure to resolve an
+    // aircraft's current position for bbox/altitude checks on *any*
+    // event type, not just `position`. Clone the Arc once.
+    let snapshot = state.snapshot.clone();
+    let needs_aircraft_lookup = bbox_filter.is_some() || alt_min.is_some() || alt_max.is_some();
 
     // Last-Event-ID: the client may include this header to resume from a
     // specific event id after reconnect. We don't yet maintain a replay
@@ -143,6 +209,35 @@ async fn stream(
                 _ => return None,
             }
         }
+        // bbox + altitude apply to the *aircraft* the event refers to,
+        // not the event itself: a velocity event for an aircraft whose
+        // last position is inside the box passes, even though the
+        // event payload carries no lat/lon. Single snapshot read per
+        // event when any geo/alt filter is active.
+        if needs_aircraft_lookup {
+            let icao = env.event.icao()?;
+            let snap = snapshot.read().expect("snapshot lock poisoned");
+            let aircraft = snap.get(&icao)?;
+            let position = aircraft.position.as_ref()?;
+            if let Some(bbox) = &bbox_filter {
+                if !bbox.contains(position.lat, position.lon) {
+                    return None;
+                }
+            }
+            if alt_min.is_some() || alt_max.is_some() {
+                let alt = position.alt_ft?;
+                if let Some(lo) = alt_min {
+                    if alt < lo {
+                        return None;
+                    }
+                }
+                if let Some(hi) = alt_max {
+                    if alt > hi {
+                        return None;
+                    }
+                }
+            }
+        }
         Some(envelope_to_sse(env))
     });
 
@@ -167,4 +262,50 @@ fn envelope_to_sse(env: EventEnvelope) -> Result<SseEvent, Infallible> {
         .id(env.id.to_string())
         .event(env.event.tag())
         .data(data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bbox_parses_canonical_form() {
+        let b = Bbox::parse("40.0,-74.0,41.0,-73.0").expect("valid");
+        assert!((b.min_lat - 40.0).abs() < 1e-9);
+        assert!((b.min_lon - -74.0).abs() < 1e-9);
+        assert!((b.max_lat - 41.0).abs() < 1e-9);
+        assert!((b.max_lon - -73.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bbox_rejects_malformed_input() {
+        assert!(Bbox::parse("").is_none());
+        assert!(Bbox::parse("40,-74,41").is_none()); // too few fields
+        assert!(Bbox::parse("40,-74,41,-73,99").is_none()); // too many
+        assert!(Bbox::parse("nope,-74,41,-73").is_none());
+    }
+
+    #[test]
+    fn bbox_rejects_out_of_range_coords() {
+        assert!(Bbox::parse("91.0,-74.0,92.0,-73.0").is_none()); // lat > 90
+        assert!(Bbox::parse("40.0,-181.0,41.0,-180.5").is_none()); // lon < -180
+        assert!(Bbox::parse("40.0,-74.0,40.0,-73.0").is_none()); // degenerate lat
+        assert!(Bbox::parse("40.0,-74.0,41.0,-74.0").is_none()); // degenerate lon
+        assert!(Bbox::parse("41.0,-74.0,40.0,-73.0").is_none()); // inverted lat
+    }
+
+    #[test]
+    fn bbox_contains_handles_boundary() {
+        let b = Bbox::parse("40.0,-74.0,41.0,-73.0").unwrap();
+        // Interior.
+        assert!(b.contains(40.5, -73.5));
+        // Edges are inclusive.
+        assert!(b.contains(40.0, -74.0));
+        assert!(b.contains(41.0, -73.0));
+        // Outside.
+        assert!(!b.contains(39.9, -73.5));
+        assert!(!b.contains(40.5, -74.1));
+        assert!(!b.contains(41.1, -73.5));
+        assert!(!b.contains(40.5, -72.9));
+    }
 }

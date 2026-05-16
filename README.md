@@ -61,6 +61,34 @@ data: {"event":"position","v":1,"t":"2026-05-15T23:02:30.036384Z",
 
 See DESIGN.md §12 for the full conventions.
 
+## Stream filters
+
+`GET /stream` accepts query parameters that compose. Bbox and altitude
+filters apply to the *aircraft* the event refers to (looked up via the
+current snapshot), so they work uniformly across `position`, `velocity`,
+`identification`, and `lost` events.
+
+| Param | Example | Effect |
+|-------|---------|--------|
+| `type` | `?type=position,velocity` | comma-separated event tags |
+| `icao` | `?icao=A0BA4E,AC92E1` | comma-separated 6-hex ICAO addresses |
+| `bbox` | `?bbox=40.0,-74.4,41.0,-73.5` | `min_lat,min_lon,max_lat,max_lon`. Aircraft without a resolved position are filtered out. |
+| `alt_min` | `?alt_min=20000` | minimum altitude in feet (inclusive). Aircraft with no known altitude are filtered out. |
+| `alt_max` | `?alt_max=5000` | maximum altitude in feet (inclusive) |
+
+Compose freely:
+
+```sh
+# Only position events for aircraft in NYC metro below 5,000 ft
+curl -sN 'http://<host>:8080/stream?type=position&bbox=40,-74.4,41,-73.5&alt_max=5000'
+
+# Anything from one specific airframe
+curl -sN 'http://<host>:8080/stream?icao=A0BA4E'
+
+# High-altitude cruise traffic only
+curl -sN 'http://<host>:8080/stream?alt_min=30000'
+```
+
 ## Documentation
 
 | Topic | Doc |
