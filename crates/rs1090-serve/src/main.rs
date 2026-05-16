@@ -378,7 +378,21 @@ fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
     loop {
         let n = source_kind.read(&mut iq_buf)?;
         if n == 0 {
-            break;
+            // EOF semantics are source-kind-specific. For a file we've
+            // reached the end and want to keep serving the final
+            // snapshot. For a live RTL-SDR, `Ok(0)` means the rs-rtl
+            // streaming thread gave up after MAX_CONSECUTIVE_ERRORS
+            // bulk-transfer failures (dongle yanked, USB reset, hub
+            // crash) — return an error so the LivenessGuard fires and
+            // systemd's `Restart=on-failure` brings us back instead of
+            // serving stale data forever.
+            match &source_kind {
+                SourceKind::File(_) => break,
+                #[cfg(feature = "rtl-sdr")]
+                SourceKind::Live(_) => anyhow::bail!(
+                    "RTL-SDR streaming thread exited (5 consecutive transfer errors; dongle disconnected)"
+                ),
+            }
         }
         samples_consumed += n as u64;
 
