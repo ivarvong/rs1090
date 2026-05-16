@@ -491,7 +491,10 @@ fn decode_velocity(me: [u8; 7]) -> Result<Velocity, DecodeError> {
             let scale = if subtype == 2 { 4.0 } else { 1.0 };
             let ew_f = ew as f64 * scale;
             let ns_f = ns as f64 * scale;
-            let speed = (ew_f.hypot(ns_f)).round() as u16;
+            // Truncate (don't round). Matches pyModeS — the de-facto Python
+            // reference — and the typical C convention of `(int)sqrt(...)`.
+            // DO-260B doesn't specify, and the difference is ≤1 kt.
+            let speed = ew_f.hypot(ns_f).trunc() as u16;
             // Heading is degrees clockwise from north. atan2(east, north).
             let heading = ew_f.atan2(ns_f).to_degrees();
             let heading = if heading < 0.0 { heading + 360.0 } else { heading };
@@ -795,4 +798,21 @@ mod tests {
     // the dispatcher with a hand-crafted Frame built through the public
     // synthesis path used in CLI integration tests, to keep this module's
     // surface area small.
+
+    #[test]
+    fn ground_velocity_truncates_speed_fraction() {
+        // Real ADS-B frame 8DA0BA4E9988760DC80C84D67445 from
+        // corpus/live_1090mhz_2min.iq — TC=19 subtype 1 (subsonic ground
+        // velocity) with EW = 117 kt and NS = 109 kt, so the true speed
+        // is √(117² + 109²) = 159.906… kt. We truncate the fractional
+        // kt (matching pyModeS and the conventional `(int)sqrt(...)`
+        // result from C reference decoders); rounding would yield 160.
+        // DO-260B doesn't specify and the difference is bounded by 1 kt.
+        let me = [0x99, 0x88, 0x76, 0x0D, 0xC8, 0x0C, 0x84];
+        let v = decode_velocity(me).expect("valid velocity ME");
+        let VelocityKind::Ground { speed_kt, .. } = v.kind else {
+            panic!("expected ground velocity, got {:?}", v.kind);
+        };
+        assert_eq!(speed_kt, 159);
+    }
 }
