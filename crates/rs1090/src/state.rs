@@ -33,10 +33,19 @@
 
 #![allow(clippy::doc_markdown)]
 
-use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::time::{Duration, Instant};
 
 use arrayvec::ArrayString;
+use hashlink::LinkedHashMap;
+use rustc_hash::FxHasher;
+
+/// Hash-and-doubly-linked-list keyed by ICAO. Doubly-linked-list end is
+/// the most-recently-used aircraft; head is the eviction candidate.
+/// `FxHasher` is a non-cryptographic hash over the ICAO `u32`; SipHash's
+/// DoS resistance is unhelpful for keys we generate ourselves from the
+/// radio, and FxHash is roughly 5× faster on integer-shaped keys.
+type AircraftMap = LinkedHashMap<Icao, Aircraft, BuildHasherDefault<FxHasher>>;
 
 use crate::cpr::{self, CprPosition, LatLon};
 use crate::crc::{self, CrcOutcome, LONG_FRAME_BYTES, SHORT_FRAME_BYTES};
@@ -170,9 +179,15 @@ pub enum StateEvent {
 // --- Tracker ----------------------------------------------------------------
 
 /// Per-receiver state tracker. Owns the aircraft table; not `Sync`.
+///
+/// The table is a `LinkedHashMap` ordered from least-recently-seen at the
+/// front to most-recently-seen at the back. Eviction (`evict_if_needed`,
+/// `evict_stale`) pops from the front in O(1) / O(k); the active-set scan
+/// for address-XOR recovery iterates from the back so it exits as soon as
+/// it hits an aircraft older than the active-ICAO window.
 #[derive(Debug)]
 pub struct StateTracker {
-    by_icao: HashMap<Icao, Aircraft>,
+    by_icao: AircraftMap,
     capacity: usize,
     /// Optional receiver location, used as a reference for local CPR decode
     /// when no recent global fix is available. If `None` we don't attempt
@@ -183,17 +198,13 @@ pub struct StateTracker {
 impl StateTracker {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            by_icao: HashMap::with_capacity(DEFAULT_CAPACITY),
-            capacity: DEFAULT_CAPACITY,
-            reference: None,
-        }
+        Self::with_capacity(DEFAULT_CAPACITY)
     }
 
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            by_icao: HashMap::with_capacity(capacity),
+            by_icao: AircraftMap::with_capacity_and_hasher(capacity, BuildHasherDefault::default()),
             capacity,
             reference: None,
         }
@@ -264,6 +275,10 @@ impl StateTracker {
                 },
             );
             out.push(StateEvent::Acquired(icao));
+        } else {
+            // Touch: move the existing entry to the MRU end so eviction
+            // sees it as fresh. `to_back` is O(1) on LinkedHashMap.
+            self.by_icao.to_back(&icao);
         }
 
         let aircraft = self
@@ -297,15 +312,18 @@ impl StateTracker {
     ///
     /// Normally called automatically by `ingest`; exposed so callers can run
     /// it on a wall-clock timer when no frames are arriving.
+    ///
+    /// Walks the LRU end of the table only — the moment we hit an entry
+    /// that's still fresh, every entry after it is fresher (since the
+    /// list is sorted by `last_seen`), so we can stop. O(k) for k actually
+    /// evicted, not O(n).
     pub fn evict_stale(&mut self, now: Instant, out: &mut Vec<StateEvent>) {
-        let stale: Vec<Icao> = self
-            .by_icao
-            .iter()
-            .filter(|(_, a)| now.saturating_duration_since(a.last_seen) > STALE_AFTER)
-            .map(|(k, _)| *k)
-            .collect();
-        for icao in stale {
-            self.by_icao.remove(&icao);
+        while let Some((icao, aircraft)) = self.by_icao.front() {
+            if now.saturating_duration_since(aircraft.last_seen) <= STALE_AFTER {
+                break;
+            }
+            let icao = *icao;
+            self.by_icao.pop_front();
             out.push(StateEvent::Lost(icao));
         }
     }
@@ -347,11 +365,15 @@ impl StateTracker {
                 if syndrome == 0 {
                     return None;
                 }
-                for (icao, aircraft) in &self.by_icao {
+                // Iterate MRU → LRU. The table is ordered by `last_seen`,
+                // so the moment we encounter an aircraft older than
+                // `ACTIVE_ICAO_WINDOW` every subsequent entry is older
+                // still — we can stop instead of scanning the whole map.
+                for (icao, aircraft) in self.by_icao.iter().rev() {
                     if at.saturating_duration_since(aircraft.last_seen)
                         >= ACTIVE_ICAO_WINDOW
                     {
-                        continue;
+                        break;
                     }
                     if crc::crc24(&icao.to_bytes()) == syndrome {
                         return Some((*icao, None));
@@ -366,14 +388,8 @@ impl StateTracker {
         if self.by_icao.len() < self.capacity {
             return;
         }
-        // Drop the single oldest entry.
-        let oldest = self
-            .by_icao
-            .iter()
-            .min_by_key(|(_, a)| a.last_seen)
-            .map(|(k, _)| *k);
-        if let Some(icao) = oldest {
-            self.by_icao.remove(&icao);
+        // Drop the single oldest entry. O(1) on LinkedHashMap.
+        if let Some((icao, _)) = self.by_icao.pop_front() {
             out.push(StateEvent::Lost(icao));
         }
         // Also opportunistically evict the obviously stale ones.
@@ -795,6 +811,36 @@ mod tests {
         assert!(tracker.get(Icao::from_bytes([0, 0, 1])).is_none());
         assert!(tracker.get(Icao::from_bytes([0, 0, 2])).is_some());
         assert!(tracker.get(Icao::from_bytes([0, 0, 3])).is_some());
+    }
+
+    #[test]
+    fn lru_touch_protects_recently_seen_aircraft() {
+        // Capacity 2; ingest f1, f2, then re-ingest f1 to "touch" it.
+        // The next new aircraft (f3) should evict f2 (now the oldest),
+        // not f1 — which means the LRU touch is wired up correctly.
+        let mut tracker = StateTracker::with_capacity(2);
+        let mut events = Vec::new();
+        let t0 = Instant::now();
+        let me = identification_me([20, 5, 19, 20, 49, 50, 51, 52]);
+        let f1 = frame_from_bytes(&build_df17([0x00, 0x00, 0x01], me));
+        let f2 = frame_from_bytes(&build_df17([0x00, 0x00, 0x02], me));
+        let f3 = frame_from_bytes(&build_df17([0x00, 0x00, 0x03], me));
+        tracker.ingest(&f1, t0, &mut events);
+        tracker.ingest(&f2, t0 + Duration::from_millis(100), &mut events);
+        // Touch f1 — moves it to the MRU end.
+        tracker.ingest(&f1, t0 + Duration::from_millis(200), &mut events);
+        events.clear();
+        // Capacity hit; f2 (now oldest) should be evicted, not f1.
+        tracker.ingest(&f3, t0 + Duration::from_millis(300), &mut events);
+
+        let icao1 = Icao::from_bytes([0, 0, 1]);
+        let icao2 = Icao::from_bytes([0, 0, 2]);
+        assert!(
+            events.iter().any(|e| matches!(e, StateEvent::Lost(i) if *i == icao2)),
+            "f2 should be evicted (it became oldest after f1 was touched)",
+        );
+        assert!(tracker.get(icao1).is_some(), "f1 should survive — it was touched");
+        assert!(tracker.get(icao2).is_none(), "f2 should be gone");
     }
 
     #[test]

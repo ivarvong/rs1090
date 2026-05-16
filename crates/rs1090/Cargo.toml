@@ -21,6 +21,8 @@ rtl-sdr = ["std", "dep:rs-rtl"]
 
 [dependencies]
 arrayvec = { workspace = true }
+hashlink = { workspace = true }
+rustc-hash = { workspace = true }
 thiserror = { workspace = true, optional = true }
 rs-rtl = { workspace = true, optional = true }
 

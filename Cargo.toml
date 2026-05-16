@@ -15,6 +15,15 @@ rs1090 = { path = "crates/rs1090", version = "0.1.0-dev" }
 
 anyhow = "1"
 arrayvec = { version = "0.7", default-features = false }
+# Fast, non-cryptographic hasher used for in-process maps keyed by
+# tightly-distributed integers (ICAO addresses). About 5× faster than
+# SipHash and never seeded — we don't need DoS resistance for keys we
+# generate ourselves from the radio.
+rustc-hash = "2"
+# Doubly-linked HashMap that preserves insertion order and supports
+# O(1) move-to-back / pop-front. Used for the LRU aircraft table so
+# touch, eviction, and active-set scans are all O(1) or O(k).
+hashlink = "0.9"
 clap = { version = "4", features = ["derive"] }
 proptest = "1"
 criterion = { version = "0.5", default-features = false }
