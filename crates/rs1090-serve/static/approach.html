@@ -27,6 +27,12 @@
     #runway { font-size: 11px; padding: 6px 8px; background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.3); border-radius: 4px; margin-bottom: 14px; }
     #runway b { color: #a5b4fc; font-size: 13px; }
 
+    .vec-ctrl { margin-bottom: 14px; }
+    .vec-ctrl .row { display: flex; align-items: baseline; justify-content: space-between; font-size: 11px; color: #8b939c; margin-bottom: 4px; }
+    .vec-ctrl .row b { color: #e6e8eb; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .vec-ctrl input[type=range] { width: 100%; accent-color: #4ade80; background: transparent; }
+    .vec-ctrl .hint { font-size: 10px; color: #6b7280; }
+
     #aircraft-title { margin: 0 0 4px; font-size: 11px; color: #8b939c; text-transform: uppercase; letter-spacing: 0.06em; }
     #aircraft { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
     #aircraft li { padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.04); cursor: pointer; }
@@ -84,6 +90,15 @@
       </div>
 
       <div id="runway">active runway guess: <b id="runway-guess">—</b></div>
+
+      <div class="vec-ctrl">
+        <div class="row">
+          <span>projection vector</span>
+          <b><span id="vec-value">60</span>s</b>
+        </div>
+        <input type="range" id="vec-slider" min="0" max="180" step="15" value="60">
+        <div class="hint">where each aircraft will be at current track + speed; 0 disables</div>
+      </div>
 
       <h2 id="aircraft-title">aircraft (closest first)</h2>
       <ul id="aircraft"></ul>
@@ -234,6 +249,18 @@
   const MAX_APPROACH_ALT = 6000;
   const APPROACH_HEADING_TOL = 25; // deg
 
+  // Radar-style projected-position vector. Reads `?vec=N` (seconds);
+  // 0 disables, >0 draws a line ahead of each aircraft showing where
+  // it will be at its current track + ground speed. The slider in the
+  // panel re-binds this live.
+  let VECTOR_SECONDS = (() => {
+    const v = parseInt(params.get("vec") || "60", 10);
+    return Number.isFinite(v) && v >= 0 && v <= 600 ? v : 60;
+  })();
+  // Tick interval in seconds — produces a dashed look that doubles as
+  // time markers. With ticks every 15s a 60s vector shows four pulses.
+  const VECTOR_TICK_S = 15;
+
   // Reflect the chosen airport in the page chrome.
   document.title = `${AIRPORT.name} approach watch — rs1090`;
   document.getElementById("title").textContent = `${AIRPORT.name} approach watch`;
@@ -273,6 +300,26 @@
   function angularDistance(a, b) {
     let d = Math.abs(a - b) % 360;
     return d > 180 ? 360 - d : d;
+  }
+
+  // Great-circle destination from a starting point given an initial
+  // bearing (degrees true) and a distance (meters). At the speeds and
+  // 1-minute horizons we care about the great-circle and a flat-earth
+  // tangent agree to fractions of a metre; the great-circle is the
+  // structurally honest form.
+  const EARTH_R_M = 6_371_000;
+  function projectGc(start, bearingDeg, distMeters) {
+    const d = distMeters / EARTH_R_M;
+    const θ = toRad(bearingDeg);
+    const φ1 = toRad(start[0]);
+    const λ1 = toRad(start[1]);
+    const sinφ2 = Math.sin(φ1) * Math.cos(d) + Math.cos(φ1) * Math.sin(d) * Math.cos(θ);
+    const φ2 = Math.asin(sinφ2);
+    const λ2 = λ1 + Math.atan2(
+      Math.sin(θ) * Math.sin(d) * Math.cos(φ1),
+      Math.cos(d) - Math.sin(φ1) * sinφ2,
+    );
+    return [toDeg(φ2), toDeg(λ2)];
   }
 
   // --- Approach classifier ---------------------------------------------------
@@ -366,11 +413,50 @@
   function ensureAircraft(icao) {
     let a = aircraft.get(icao);
     if (!a) {
-      a = { icao, marker: null, callsign: null, lat: null, lon: null, alt_ft: null, alt_source: null,
-            track: null, gs_mps: null, vr_mps: null, lastUpdate: Date.now() };
+      a = { icao, marker: null, vector: null, callsign: null, lat: null, lon: null,
+            alt_ft: null, alt_source: null, track: null, gs_mps: null, vr_mps: null,
+            lastUpdate: Date.now() };
       aircraft.set(icao, a);
     }
     return a;
+  }
+
+  // Compute a polyline path representing where the aircraft will be over
+  // the next `VECTOR_SECONDS`, with a tick segment every `VECTOR_TICK_S`
+  // seconds. Returns `null` if we can't draw a meaningful vector — no
+  // position, no track, no ground speed, or vector disabled.
+  function vectorPath(a) {
+    if (VECTOR_SECONDS <= 0) return null;
+    if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return null;
+    if (!Number.isFinite(a.track) || !Number.isFinite(a.gs_mps) || a.gs_mps <= 0) return null;
+    const pts = [[a.lat, a.lon]];
+    const stepS = Math.min(VECTOR_TICK_S, VECTOR_SECONDS);
+    let t = stepS;
+    while (t <= VECTOR_SECONDS + 1e-9) {
+      pts.push(projectGc([a.lat, a.lon], a.track, a.gs_mps * t));
+      t += stepS;
+    }
+    if (pts.length < 2) return null;
+    return pts;
+  }
+
+  function refreshVector(a) {
+    const pts = vectorPath(a);
+    if (!pts) {
+      if (a.vector) { map.removeLayer(a.vector); a.vector = null; }
+      return;
+    }
+    const stale = (Date.now() - a.lastUpdate) > 30_000;
+    const color = stale ? "#6b7280" : (a.onApproach ? "#4ade80" : "#60a5fa");
+    if (!a.vector) {
+      // dashArray "5 3" creates the per-tick break naturally — combined
+      // with the explicit polyline-point density per VECTOR_TICK_S we get
+      // a clear cadence that reads as time-along-the-vector.
+      a.vector = L.polyline(pts, { color, weight: 1.4, opacity: 0.55, dashArray: "5 3" }).addTo(map);
+    } else {
+      a.vector.setLatLngs(pts);
+      a.vector.setStyle({ color });
+    }
   }
 
   function recompute(a) {
@@ -396,6 +482,7 @@
       a.marker.setIcon(icon);
       if (a.marker.isPopupOpen()) a.marker.getPopup().setContent(popupHtml(a));
     }
+    refreshVector(a);
   }
 
   function popupHtml(a) {
@@ -570,7 +657,10 @@
     es.addEventListener("lost", e => {
       const d = JSON.parse(e.data);
       const a = aircraft.get(d.icao);
-      if (a && a.marker) map.removeLayer(a.marker);
+      if (a) {
+        if (a.marker) map.removeLayer(a.marker);
+        if (a.vector) map.removeLayer(a.vector);
+      }
       aircraft.delete(d.icao);
       renderPanel();
     });
@@ -582,6 +672,26 @@
     for (const a of aircraft.values()) refreshMarker(a);
     renderPanel();
   }, 10_000);
+
+  // Vector slider wiring: re-renders every aircraft's projection
+  // line on every input event (cheap — bounded by visible aircraft).
+  // The URL is updated lazily on `change` so reloads remember the
+  // user's preference without spamming history entries during drag.
+  const vecSlider = document.getElementById("vec-slider");
+  const vecValue = document.getElementById("vec-value");
+  vecSlider.value = String(VECTOR_SECONDS);
+  vecValue.textContent = String(VECTOR_SECONDS);
+  vecSlider.addEventListener("input", () => {
+    VECTOR_SECONDS = parseInt(vecSlider.value, 10);
+    vecValue.textContent = String(VECTOR_SECONDS);
+    for (const a of aircraft.values()) refreshVector(a);
+  });
+  vecSlider.addEventListener("change", () => {
+    const url = new URL(location.href);
+    if (VECTOR_SECONDS === 60) url.searchParams.delete("vec");
+    else url.searchParams.set("vec", String(VECTOR_SECONDS));
+    history.replaceState(null, "", url.toString());
+  });
 
   seedFromSnapshot();
   openStream();
