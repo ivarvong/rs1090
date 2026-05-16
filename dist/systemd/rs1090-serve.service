@@ -1,0 +1,65 @@
+[Unit]
+Description=rs1090 Mode S / ADS-B HTTP+SSE server
+Documentation=https://github.com/ivarvong/rs1090
+# RTL-SDR dongles enumerate on USB asynchronously; wait until network is
+# up and udev has settled so /dev/bus/usb permissions are in place.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- What runs ----------------------------------------------------------
+# Edit this line (or drop in an override via `systemctl edit
+# rs1090-serve`) to match where the binary lives, your receiver
+# location, and which protocols you want exposed.
+ExecStart=/usr/local/bin/rs1090-serve \
+    --bind 0.0.0.0:8080 \
+    --reference 40.70,-73.99 \
+    --gdl90 \
+    --avr \
+    --beast \
+    live --auto-gain
+
+# --- Restart policy -----------------------------------------------------
+# `on-failure` covers all exit paths we treat as failure (decoder thread
+# died, panic on the runtime, USB enumerate failure, port-bind failure).
+# `RestartSec=5s` is enough to let a yanked dongle settle, short enough
+# that monitoring won't notice. `StartLimitIntervalSec=0` disables the
+# per-window flap protection so a flaky USB cable that disconnects every
+# 30s doesn't eventually exhaust the burst budget and leave the service
+# stopped.
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=0
+
+# --- Permissions --------------------------------------------------------
+# Adjust `User=` to the unprivileged account that owns the binary and is
+# in the `plugdev` group (Debian/Raspberry Pi OS convention for USB
+# device access via the rtl-sdr udev rules).
+User=ivar
+SupplementaryGroups=plugdev
+
+# Don't let the journal eat the whole disk on a tight loop of restarts —
+# rate-limit to 1000 lines per 30s. Anything past that is dropped, the
+# process still runs.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
+
+# --- Hardening ----------------------------------------------------------
+# Reasonable sandboxing for a service that only needs USB + network. If
+# you mount the binary or config from a non-standard path, adjust
+# ReadWritePaths= accordingly.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

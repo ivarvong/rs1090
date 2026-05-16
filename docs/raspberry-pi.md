@@ -150,30 +150,45 @@ Debian-family Pi OS.
 
 ## Running it as a systemd service
 
-```ini
-# /etc/systemd/system/rs1090-serve.service
-[Unit]
-Description=rs1090 ADS-B decoder
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-User=ivar
-ExecStart=/home/ivar/rs1090-serve --bind 0.0.0.0:8080 --reference 40.70,-73.99 live
-Restart=on-failure
-RestartSec=5s
-# Decoder hits the SDR; needs the rtl-sdr group.
-SupplementaryGroups=plugdev
-
-[Install]
-WantedBy=multi-user.target
-```
+The repo ships a ready-to-install unit at
+[`dist/systemd/rs1090-serve.service`](../dist/systemd/rs1090-serve.service)
+with an `install.sh` helper next to it:
 
 ```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now rs1090-serve
-sudo journalctl -u rs1090-serve -f
+# On the Mac: build and ship the binary to the system path the unit expects.
+cargo zigbuild --release -p rs1090-serve --target aarch64-unknown-linux-gnu
+scp target/aarch64-unknown-linux-gnu/release/rs1090-serve ivar@<pi>:/tmp/rs1090-serve
+ssh ivar@<pi> 'sudo install -m 0755 /tmp/rs1090-serve /usr/local/bin/rs1090-serve'
+
+# Ship the unit + install helper.
+rsync -azh dist/systemd/ ivar@<pi>:/tmp/rs1090-systemd/
+ssh ivar@<pi> 'sudo /tmp/rs1090-systemd/install.sh'
 ```
+
+The unit ships `Restart=on-failure`, `RestartSec=5s`, and
+`StartLimitIntervalSec=0` (so a flaky USB cable can disconnect every
+30s indefinitely without tripping flap protection). `WantedBy=multi-user.target`
+plus `systemctl enable` from the installer means the service comes
+back automatically after a reboot.
+
+Edit the `ExecStart=` line in the unit before installing, or layer
+your overrides on top with `sudo systemctl edit rs1090-serve`:
+
+```ini
+# /etc/systemd/system/rs1090-serve.service.d/override.conf
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/rs1090-serve \
+    --bind 0.0.0.0:8080 \
+    --reference 40.70,-73.99 \
+    --gdl90-target 192.168.1.100:4000 \
+    --avr \
+    --beast \
+    live --auto-gain
+```
+
+(The first empty `ExecStart=` clears the inherited value — required
+by systemd whenever you override `ExecStart` from a drop-in.)
 
 `/healthz` returns 503 if the decoder thread has died, so `Restart=on-failure`
 plus a Tailscale-fronted Caddy probe gives self-healing without much
