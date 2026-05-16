@@ -25,3 +25,17 @@ path = "fuzz_targets/decode_message.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "process_frame"
+path = "fuzz_targets/process_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crc_check"
+path = "fuzz_targets/crc_check.rs"
+test = false
+doc = false
+bench = false
