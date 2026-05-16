@@ -5,7 +5,7 @@
 //! anything much smaller.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use rs1090::magnitude::{batch_amam, batch_lut};
+use rs1090::test_utils::{batch_amam, batch_lut};
 use rs1090::Iq;
 
 fn sample_chunk(n: usize) -> Vec<Iq> {

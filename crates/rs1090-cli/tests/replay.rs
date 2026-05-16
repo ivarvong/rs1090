@@ -12,7 +12,9 @@ use std::io::Write;
 use std::process::Command;
 
 use rs1090::crc;
-use rs1090::demod::{synth_bits_as_magnitude, PREAMBLE_HIGH_IDX, PREAMBLE_SAMPLES, SAMPLES_PER_BIT};
+use rs1090::test_utils::{
+    synth_bits_as_magnitude, PREAMBLE_HIGH_IDX, PREAMBLE_SAMPLES, SAMPLES_PER_BIT,
+};
 
 /// Long-frame size in bytes. Mirrored locally so this integration test
 /// doesn't depend on whether `crc::LONG_FRAME_BYTES` is part of the public

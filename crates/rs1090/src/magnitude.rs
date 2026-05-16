@@ -56,9 +56,11 @@ pub fn alpha_max_beta_min(s: Iq) -> u16 {
 /// Exact magnitude via 128 KiB lookup table.
 ///
 /// One indexed load per sample. The table is computed at compile time and
-/// lives in `.rodata`.
+/// lives in `.rodata`. Currently used only by the bench harness; the
+/// detector picks [`alpha_max_beta_min`] for its smaller cache footprint.
 #[inline]
 #[must_use]
+#[cfg(any(feature = "test-utils", test))]
 pub fn lut(s: Iq) -> u16 {
     let idx = ((s.i as u8 as usize) << 8) | (s.q as u8 as usize);
     MAG_LUT[idx]
@@ -67,8 +69,9 @@ pub fn lut(s: Iq) -> u16 {
 /// Compute magnitudes for a batch of samples using [`alpha_max_beta_min`].
 ///
 /// Equivalent to `out[i] = alpha_max_beta_min(samples[i])`. The slices must
-/// have the same length.
+/// have the same length. Bench / test surface only.
 #[inline]
+#[cfg(any(feature = "test-utils", test))]
 pub fn batch_amam(samples: &[Iq], out: &mut [u16]) {
     assert_eq!(samples.len(), out.len(), "slice length mismatch");
     for (s, m) in samples.iter().zip(out.iter_mut()) {
@@ -76,8 +79,10 @@ pub fn batch_amam(samples: &[Iq], out: &mut [u16]) {
     }
 }
 
-/// Compute magnitudes for a batch of samples using [`lut`].
+/// Compute magnitudes for a batch of samples using [`lut`]. Bench / test
+/// surface only.
 #[inline]
+#[cfg(any(feature = "test-utils", test))]
 pub fn batch_lut(samples: &[Iq], out: &mut [u16]) {
     assert_eq!(samples.len(), out.len(), "slice length mismatch");
     for (s, m) in samples.iter().zip(out.iter_mut()) {
@@ -88,12 +93,14 @@ pub fn batch_lut(samples: &[Iq], out: &mut [u16]) {
 // --- LUT construction --------------------------------------------------------
 
 /// 128 KiB table mapping each (i, q) byte pair to its rounded true magnitude.
+#[cfg(any(feature = "test-utils", test))]
 static MAG_LUT: [u16; 65536] = build_mag_lut();
 
 // `clippy::large_stack_arrays` would flag this if it ran here, but the array
 // is initialized inside a `const fn` evaluated at compile time and the
 // resulting `static` lives in `.rodata` — no runtime stack involved.
 #[allow(clippy::large_stack_arrays)]
+#[cfg(any(feature = "test-utils", test))]
 const fn build_mag_lut() -> [u16; 65536] {
     let mut t = [0u16; 65536];
     let mut iu = 0u32;
@@ -115,6 +122,7 @@ const fn build_mag_lut() -> [u16; 65536] {
 }
 
 /// Integer square root, rounded to nearest (half rounds up).
+#[cfg(any(feature = "test-utils", test))]
 const fn isqrt_round(n: u32) -> u32 {
     if n == 0 {
         return 0;

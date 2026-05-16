@@ -12,7 +12,9 @@ use std::thread;
 use std::time::Duration;
 
 use rs1090::crc;
-use rs1090::demod::{synth_bits_as_magnitude, PREAMBLE_HIGH_IDX, PREAMBLE_SAMPLES, SAMPLES_PER_BIT};
+use rs1090::test_utils::{
+    synth_bits_as_magnitude, PREAMBLE_HIGH_IDX, PREAMBLE_SAMPLES, SAMPLES_PER_BIT,
+};
 
 const LONG_FRAME_BYTES: usize = 14;
 

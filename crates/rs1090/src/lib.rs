@@ -16,15 +16,34 @@
 
 pub mod crc;
 pub mod cpr;
-pub mod demod;
 pub mod frame;
-pub mod magnitude;
 pub mod message;
+
+// Implementation detail modules. The signal-processing primitives
+// (`demod`, `magnitude`) are deliberately *not* part of the public
+// API — their shape is load-bearing for the frame-detection pipeline
+// and must remain free to evolve with the implementation. Consumers
+// that need access for tests or benchmarks should enable the
+// `test-utils` feature and use [`test_utils`].
+pub(crate) mod demod;
+pub(crate) mod magnitude;
 
 #[cfg(feature = "std")]
 pub mod source;
 #[cfg(feature = "std")]
 pub mod state;
+
+/// Helpers re-exported for integration tests, fuzz harnesses, and
+/// benchmarks. Enabled by the `test-utils` feature. **Not** part of the
+/// stable API — items here may change shape in any release.
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    pub use crate::demod::{
+        synth_bits_as_magnitude, synth_preamble, PREAMBLE_HIGH_IDX, PREAMBLE_SAMPLES,
+        SAMPLES_PER_BIT,
+    };
+    pub use crate::magnitude::{batch_amam, batch_lut};
+}
 
 /// A complex I/Q sample with signed 8-bit components.
 ///

@@ -98,6 +98,15 @@ impl NoiseFloor {
         Self::new(0, Self::DEFAULT_SHIFT)
     }
 
+    /// Read the current floor without updating. Test-only; the
+    /// detector path always uses [`Self::update`] which returns the new
+    /// value alongside.
+    #[inline]
+    #[cfg(test)]
+    pub fn current(&self) -> u16 {
+        ((self.acc >> self.shift).min(u32::from(u16::MAX))) as u16
+    }
+
     /// Update with one sample and return the current floor estimate.
     ///
     /// `floor_{n+1} = floor_n + (sample - floor_n) * 2^-shift`.
@@ -117,12 +126,6 @@ impl NoiseFloor {
         ((self.acc >> self.shift).min(u32::from(u16::MAX))) as u16
     }
 
-    /// Read the current floor without updating.
-    #[inline]
-    #[must_use]
-    pub fn current(&self) -> u16 {
-        ((self.acc >> self.shift).min(u32::from(u16::MAX))) as u16
-    }
 }
 
 // --- Preamble correlator -----------------------------------------------------
