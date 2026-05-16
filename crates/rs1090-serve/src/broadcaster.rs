@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
+use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::sync::{broadcast, Notify};
 
 use rs1090::frame::Frame;
@@ -65,10 +66,13 @@ pub struct AppState {
     /// dead decoder takes the HTTP server down with it instead of
     /// leaving the process serving a frozen snapshot.
     pub decoder_died: Arc<Notify>,
+    /// Prometheus exposition handle. Cloned cheaply; the `/metrics`
+    /// HTTP handler calls `.render()` on it to produce the text.
+    pub metrics: PrometheusHandle,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(metrics: PrometheusHandle) -> Self {
         let (tx, _rx) = broadcast::channel(DEFAULT_BROADCAST_CAPACITY);
         let (frame_tx, _frame_rx) = broadcast::channel(DEFAULT_BROADCAST_CAPACITY);
         Self {
@@ -77,13 +81,8 @@ impl AppState {
             snapshot: Arc::new(RwLock::new(HashMap::new())),
             decoder_alive: Arc::new(AtomicBool::new(true)),
             decoder_died: Arc::new(Notify::new()),
+            metrics,
         }
-    }
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

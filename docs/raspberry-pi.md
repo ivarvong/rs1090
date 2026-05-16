@@ -179,6 +179,20 @@ sudo journalctl -u rs1090-serve -f
 plus a Tailscale-fronted Caddy probe gives self-healing without much
 ceremony.
 
+`/metrics` exposes Prometheus counters and gauges — point a scraper at it
+and you get:
+
+| Metric | Type | Purpose |
+|---|---|---|
+| `rs1090_frames_total{outcome=clean|corrected|failed}` | counter | per-frame throughput, broken out by CRC outcome |
+| `rs1090_state_events_total{kind=...}` | counter | per-event tracker output (acquired, position, velocity, …) |
+| `rs1090_aircraft_tracked` | gauge | current tracker table size |
+| `rs1090_sse_subscribers` | gauge | live SSE clients on `/stream` |
+| `rs1090_decoder_alive` | gauge | 1 while the decoder thread is alive, 0 once it has died |
+
+Plenty for a Grafana panel — frames/sec rate, corrected-frame ratio
+(noise-floor proxy), aircraft trend, alert on `rs1090_decoder_alive == 0`.
+
 ## BLE peripheral (optional)
 
 The `ble` feature on `rs1090-serve` exposes a Bluetooth Low Energy GATT

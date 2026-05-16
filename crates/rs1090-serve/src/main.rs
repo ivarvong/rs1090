@@ -10,6 +10,7 @@ mod beast;
 mod broadcaster;
 mod events;
 mod gdl90;
+mod metrics;
 mod server;
 
 #[cfg(all(target_os = "linux", feature = "ble"))]
@@ -27,6 +28,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use rs1090::cpr::LatLon;
+use rs1090::crc::CrcOutcome;
 use rs1090::frame::FrameDetector;
 use rs1090::source::{IqFileSource, SampleSource};
 use rs1090::state::{StateEvent, StateTracker};
@@ -148,8 +150,12 @@ fn parse_latlon(s: &str) -> std::result::Result<LatLon, String> {
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     init_tracing();
+    let metrics_handle = metrics::install();
+    metrics::describe_all();
+    ::metrics::gauge!(metrics::DECODER_ALIVE).set(1.0);
+
     let cli = Cli::parse();
-    let state = AppState::new();
+    let state = AppState::new(metrics_handle);
     let bind = cli.bind.clone();
     let ble_requested = cli.ble;
     let gdl90_target = match (cli.gdl90, cli.gdl90_target) {
@@ -203,6 +209,7 @@ fn main() -> Result<()> {
                 fn drop(&mut self) {
                     if self.armed {
                         self.flag.store(false, std::sync::atomic::Ordering::Release);
+                        ::metrics::gauge!(crate::metrics::DECODER_ALIVE).set(0.0);
                         // Wake the tokio shutdown task — the server should
                         // exit too so systemd's `Restart=on-failure` brings
                         // the whole process back rather than leaving us
@@ -396,6 +403,11 @@ fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
 
         detector.process(&iq_buf[..n], |frame| {
             frames += 1;
+            ::metrics::counter!(
+                crate::metrics::FRAMES_TOTAL,
+                "outcome" => crc_outcome_label(frame.crc_outcome()),
+            )
+            .increment(1);
             // Fan the raw Frame out to AVR / Beast / etc. before any
             // decode pass. Errors only fire when no consumer is
             // subscribed; drop silently. `Frame: Copy`, so this is
@@ -403,6 +415,11 @@ fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
             let _ = frame_tx.send(*frame);
             tracker.ingest(frame, virtual_now, &mut events_buf);
             for ev in events_buf.drain(..) {
+                ::metrics::counter!(
+                    crate::metrics::STATE_EVENTS_TOTAL,
+                    "kind" => state_event_label(&ev),
+                )
+                .increment(1);
                 // Refresh the shared snapshot keyed on the affected ICAO.
                 update_snapshot(&snapshot, &tracker, &ev);
                 // Convert and broadcast. Orphan events are dropped at this
@@ -418,6 +435,8 @@ fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
                     let _ = tx.send(env);
                 }
             }
+            #[allow(clippy::cast_precision_loss)]
+            ::metrics::gauge!(crate::metrics::AIRCRAFT_TRACKED).set(tracker.len() as f64);
         });
     }
 
@@ -458,6 +477,34 @@ fn update_snapshot(
         map.remove(&icao);
     } else if let Some(a) = tracker.get(icao) {
         map.insert(icao, snapshot_from(a));
+    }
+}
+
+/// Low-cardinality label for a frame's CRC outcome. We deliberately
+/// fold `Corrected { bit }` down to the variant name — the per-bit
+/// counter would explode the time-series count for no operational gain.
+fn crc_outcome_label(outcome: CrcOutcome) -> &'static str {
+    match outcome {
+        CrcOutcome::Clean => "clean",
+        CrcOutcome::Corrected { .. } => "corrected",
+        CrcOutcome::Failed => "failed",
+    }
+}
+
+/// Low-cardinality label for a tracker event. Matches the SSE wire
+/// `tag()` strings so a `STATE_EVENTS_TOTAL{kind="position"}` total
+/// lines up one-to-one with what SSE clients see — except for
+/// `orphan`, which is dropped at the wire boundary but still counted
+/// here so operators can monitor unassociated-frame rates.
+fn state_event_label(ev: &StateEvent) -> &'static str {
+    match ev {
+        StateEvent::Acquired(_) => "acquired",
+        StateEvent::Identification { .. } => "identification",
+        StateEvent::Position { .. } => "position",
+        StateEvent::Velocity { .. } => "velocity",
+        StateEvent::Lost(_) => "lost",
+        StateEvent::AddressRecovered { .. } => "address_recovered",
+        StateEvent::Orphan { .. } => "orphan",
     }
 }
 

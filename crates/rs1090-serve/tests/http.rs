@@ -197,6 +197,32 @@ fn http_endpoints_serve_decoded_state() {
         body.contains("icao") || body.is_empty(),
         "expected error body, got: {body}",
     );
+
+    // /metrics — Prometheus exposition. After decoding our DF 17 frame,
+    // we expect both the per-frame counter (with `outcome="clean"`) and
+    // the identification state-event counter to be non-zero, plus the
+    // aircraft-tracked gauge to register our one ICAO.
+    let body = ureq_get(&format!("http://127.0.0.1:{port}/metrics")).expect("metrics");
+    assert!(
+        body.contains("# TYPE rs1090_frames_total counter"),
+        "metrics body missing frames counter type: {body}"
+    );
+    assert!(
+        body.contains("rs1090_frames_total{outcome=\"clean\"} 1"),
+        "metrics body missing clean-frame counter: {body}"
+    );
+    assert!(
+        body.contains("rs1090_state_events_total{kind=\"identification\"} 1"),
+        "metrics body missing identification event counter: {body}"
+    );
+    assert!(
+        body.contains("rs1090_aircraft_tracked 1"),
+        "metrics body missing aircraft gauge: {body}"
+    );
+    assert!(
+        body.contains("rs1090_decoder_alive 1"),
+        "metrics body missing decoder_alive gauge: {body}"
+    );
 }
 
 /// RAII helper: ensure the spawned child is killed when the test exits.

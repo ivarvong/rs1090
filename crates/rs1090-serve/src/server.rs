@@ -25,10 +25,22 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/approach", get(approach))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics_handler))
         .route("/aircraft", get(list_aircraft))
         .route("/aircraft/:icao", get(get_aircraft))
         .route("/stream", get(stream))
         .with_state(state)
+}
+
+/// Prometheus exposition. Renders the current registry to text; the
+/// shape is the standard `# HELP` / `# TYPE` / `<name>{label="v"} value`
+/// format that every Prometheus-compatible scraper understands.
+async fn metrics_handler(State(state): State<AppState>) -> Response {
+    (
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics.render(),
+    )
+        .into_response()
 }
 
 /// Single-page live map. Static HTML/CSS/JS embedded at compile time so
@@ -167,6 +179,22 @@ impl Bbox {
     }
 }
 
+/// RAII counter for the `rs1090_sse_subscribers` gauge.
+///
+/// We can't tie the gauge to the underlying `broadcast::Receiver`
+/// because axum's SSE stream wraps it in opaque combinators; instead
+/// we increment on subscribe and put a drop-guard inside the
+/// `filter_map` closure, which the stream owns. When the client
+/// disconnects, the stream (and the closure, and this guard) drops,
+/// decrementing the gauge.
+struct SseSubscriberGuard;
+
+impl Drop for SseSubscriberGuard {
+    fn drop(&mut self) {
+        ::metrics::gauge!(crate::metrics::SSE_SUBSCRIBERS).decrement(1.0);
+    }
+}
+
 async fn stream(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,
@@ -176,6 +204,8 @@ async fn stream(
     // emitted between filter setup and the receiver attaching.
     let rx = state.broadcaster.subscribe();
     let stream = BroadcastStream::new(rx);
+    ::metrics::gauge!(crate::metrics::SSE_SUBSCRIBERS).increment(1.0);
+    let subscriber_guard = SseSubscriberGuard;
 
     let type_filter: Option<HashSet<String>> = params
         .r#type
@@ -209,6 +239,9 @@ async fn stream(
         .and_then(|s| s.parse().ok());
 
     let filtered = stream.filter_map(move |item| {
+        // Capture the guard by reference inside the closure so it
+        // moves into the stream's state and drops with the stream.
+        let _ = &subscriber_guard;
         let env = item.ok()?;
         if let Some(min) = last_event_id {
             if env.id <= min {

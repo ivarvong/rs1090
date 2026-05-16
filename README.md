@@ -27,8 +27,8 @@ below cover every reproducible workflow.
   feature gates a live USB backend via pure-Rust `nusb`.
 - `crates/rs1090-cli` — `replay`, `track`, and `live` subcommands.
 - `crates/rs1090-serve` — HTTP server with `/aircraft`,
-  `/aircraft/:icao`, `/healthz`, `/stream` (Server-Sent Events), and
-  `/` (live Leaflet map).
+  `/aircraft/:icao`, `/healthz`, `/metrics` (Prometheus), `/stream`
+  (Server-Sent Events), and `/` (live Leaflet map).
 - `scripts/` — `diff_pymodes.py` differential-test harness,
   `s8_to_uc8` Cargo example for UC8 conversion.
 
