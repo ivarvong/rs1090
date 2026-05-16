@@ -75,6 +75,15 @@ async fn send_tick(sock: &UdpSocket, state: &AppState, target: SocketAddr) {
         return;
     }
 
+    // ForeFlight identification message. Not part of the public GDL90
+    // spec — it's a ForeFlight extension that gates traffic display
+    // on recognising the source. Many open-source GDL90 senders
+    // (Stratux, dump978) emit this once per second to stay on
+    // ForeFlight's allow-list. Garmin Pilot and FlyQ ignore it
+    // harmlessly.
+    let ff_id = encode_foreflight_id();
+    let _ = sock.send_to(&ff_id, target).await;
+
     let snapshot: Vec<AircraftSnapshot> = {
         let map = state.snapshot.read().expect("snapshot lock poisoned");
         map.values().cloned().collect()
@@ -180,6 +189,55 @@ fn seconds_since_utc_midnight() -> u32 {
     // Wrap into a day. 17-bit field; 86400 < 131072 so a u32 modulo is
     // fine and never overflows the field.
     u32::try_from(secs % 86_400).unwrap_or(0)
+}
+
+// --- ForeFlight ID (message ID 0x65, sub-ID 0x00) -------------------------
+
+/// ForeFlight's source-identification extension. Not in the GDL90
+/// public spec; documented in ForeFlight's "Broadcast Protocols"
+/// note. Required for ForeFlight to enable traffic display from a
+/// previously-unseen GDL90 source. Stratux and dump978 both emit it
+/// every second; other EFB clients (Garmin Pilot, FlyQ) ignore the
+/// message harmlessly.
+///
+/// Payload (38 bytes after message ID):
+///
+/// ```text
+///   sub-id (1)      : 0x00
+///   serial   (8 LE) : opaque device identifier
+///   short name (8)  : ASCII, space-padded
+///   long name  (16) : ASCII, space-padded
+///   capabilities (4 BE) : bit 0 = WGS-84 geometric altitude provider,
+///                         bit 1 = MSL altitude provider. We emit
+///                         barometric altitudes, which ForeFlight
+///                         treats as MSL — leave both bits clear.
+/// ```
+fn encode_foreflight_id() -> Vec<u8> {
+    let mut buf = [0u8; 39];
+    buf[0] = 0x65; // message ID
+    buf[1] = 0x00; // sub-message ID: identification
+
+    // Serial: any unique 64-bit token. The high bits spell "rs1090".
+    let serial = 0x7273_3130_3930_0001_u64;
+    buf[2..10].copy_from_slice(&serial.to_le_bytes());
+
+    // Short name (8 bytes, space-padded).
+    let short = b"rs1090  ";
+    buf[10..18].copy_from_slice(short);
+
+    // Long name (16 bytes, space-padded).
+    let long = b"rs1090 ADS-B    ";
+    buf[18..34].copy_from_slice(long);
+
+    // Capabilities (big-endian u32). 0 = barometric altitudes,
+    // no MSL conversion. ForeFlight treats the GDL90 altitude as MSL,
+    // which is what our baro altitudes effectively are.
+    buf[34..38].copy_from_slice(&0u32.to_be_bytes());
+
+    // (Byte 38 in some references is "MSL altitude scaling" reserved
+    // for future use; left zero.)
+
+    frame(&buf)
 }
 
 // --- Traffic Report (message ID 20) ----------------------------------------
