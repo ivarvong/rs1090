@@ -17,3 +17,7 @@ Cargo.lock.bak
 perf.data*
 flamegraph.svg
 dhat-heap.json
+
+# Per-deployment secrets (Pi hostname, user, reference position, etc.)
+# Sourced by dist/deploy.sh; see dist/.env.example for the template.
+dist/.env
