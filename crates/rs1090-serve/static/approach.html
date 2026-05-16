@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LGA approach watch — rs1090</title>
+  <title>approach watch — rs1090</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
         crossorigin="">
@@ -47,12 +47,16 @@
     .plane.stale .body { fill: #6b7280; }
     .plane .label { position: absolute; top: 26px; left: 50%; transform: translateX(-50%); color: #e6e8eb; font-size: 10px; font-weight: 600; background: rgba(20,22,26,0.85); padding: 1px 5px; border-radius: 3px; white-space: nowrap; pointer-events: none; }
 
-    /* User / LGA pins. */
+    /* User / airport pins. */
     .pin { position: relative; font-size: 16px; line-height: 1; transform: translate(-50%, -100%); }
     .pin .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.5); }
     .pin .label { position: absolute; left: 18px; top: -2px; white-space: nowrap; font-size: 10px; font-weight: 600; background: rgba(20,22,26,0.85); padding: 1px 5px; border-radius: 3px; }
     .pin.user .dot { background: #fbbf24; }
-    .pin.lga .dot { background: #a5b4fc; }
+    .pin.airport .dot { background: #a5b4fc; }
+
+    #error { background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.4); color: #fca5a5; padding: 12px; border-radius: 4px; margin: 12px; font-size: 12px; line-height: 1.5; }
+    #error b { color: #fecaca; }
+    #error code { background: rgba(0,0,0,0.3); padding: 0 4px; border-radius: 2px; }
 
     .leaflet-popup-content-wrapper { background: #14161a; color: #e6e8eb; }
     .leaflet-popup-content { font-size: 12px; margin: 10px 12px; }
@@ -67,14 +71,13 @@
 <body>
   <div id="app">
     <aside id="panel">
-      <h1>LGA approach watch</h1>
-      <div class="sub">aircraft on final to KLGA, visible from you</div>
+      <h1 id="title">approach watch</h1>
+      <div class="sub" id="subtitle">aircraft on final, visible from you</div>
       <div id="status" class="wait">connecting…</div>
 
       <div class="stat-grid">
-        <span class="k">you</span><span class="v" id="you">40.7021, -73.9826</span>
-        <span class="k">LGA</span><span class="v" id="lga">40.7769, -73.8740 · 6 nm · ENE</span>
-        <span class="k">looking</span><span class="v">east</span>
+        <span class="k">you</span><span class="v" id="you">—</span>
+        <span class="k" id="airport-label">airport</span><span class="v" id="airport-stats">—</span>
         <span class="k">tracked</span><span class="v" id="tracked">0</span>
         <span class="k">low + near</span><span class="v" id="low-near">0</span>
         <span class="k">on approach</span><span class="v" id="approach-count">0</span>
@@ -94,34 +97,149 @@
   <script>
   "use strict";
 
-  // --- Constants --------------------------------------------------------------
+  // --- Configuration ----------------------------------------------------------
 
-  // Read user location from the URL: ?me=lat,lon. Defaults to the
-  // location-of-record provided when this page was built. Permits anyone
-  // on the tailnet to point the page at their own viewpoint.
+  // Builtin airport table. Each entry needs:
+  //   ref   : [lat, lon] of the airport reference point
+  //   runways: array of { runway, course } where `course` is the true
+  //            heading (in degrees) an aircraft must be flying to be on
+  //            final to that runway. NYC declination is ~-13°, so a
+  //            magnetic 220° becomes true 207°.
+  //   bbox  : SSE subscription bounding box, hand-tuned to cover the
+  //           airport plus a useful chunk of approach corridor.
+  // Adding a new airport is one entry — clone-and-edit.
+  const AIRPORTS = {
+    lga: {
+      name: "LGA",
+      icao: "KLGA",
+      ref: [40.7769, -73.8740],
+      runways: [
+        { runway: "04", course: 27 },
+        { runway: "22", course: 207 },
+        { runway: "13", course: 117 },
+        { runway: "31", course: 297 },
+      ],
+      bbox: "40.55,-74.15,40.95,-73.65",
+    },
+    jfk: {
+      name: "JFK",
+      icao: "KJFK",
+      ref: [40.6413, -73.7781],
+      runways: [
+        { runway: "04L/R", course: 31 },
+        { runway: "22L/R", course: 211 },
+        { runway: "13L/R", course: 121 },
+        { runway: "31L/R", course: 301 },
+      ],
+      bbox: "40.45,-74.00,40.85,-73.45",
+    },
+    ewr: {
+      name: "EWR",
+      icao: "KEWR",
+      ref: [40.6925, -74.1687],
+      runways: [
+        { runway: "04L/R", course: 27 },
+        { runway: "22L/R", course: 207 },
+        { runway: "11", course: 97 },
+        { runway: "29", course: 277 },
+      ],
+      bbox: "40.50,-74.40,40.90,-73.95",
+    },
+  };
+
   const params = new URLSearchParams(location.search);
+
+  // Parse `?runways=04:27,22:207`. Each pair is `name:course`.
+  function parseRunways(s) {
+    if (!s) return null;
+    const out = [];
+    for (const tok of s.split(",")) {
+      const [name, course] = tok.split(":");
+      const c = Number(course);
+      if (!name || !Number.isFinite(c)) return null;
+      out.push({ runway: name.trim(), course: c });
+    }
+    return out.length ? out : null;
+  }
+
+  // Resolve the airport config from URL params, with three forms:
+  //   ?airport=lga                 — look up in the builtin table.
+  //   ?ref=LAT,LON&runways=N:C,…   — fully custom (also accepts &bbox=…
+  //                                  and &name=…).
+  //   (nothing)                    — surface a help message.
+  function resolveAirport() {
+    const tag = (params.get("airport") || "").toLowerCase();
+    if (tag && AIRPORTS[tag]) return AIRPORTS[tag];
+
+    const refStr = params.get("ref");
+    const runwaysStr = params.get("runways");
+    if (refStr && runwaysStr) {
+      const ref = refStr.split(",").map(Number);
+      const runways = parseRunways(runwaysStr);
+      if (ref.length === 2 && ref.every(Number.isFinite) && runways) {
+        // Default bbox is ±0.2° around ref — about a 12 nm × 15 nm box
+        // at NYC latitudes.
+        const bbox = params.get("bbox") || [
+          (ref[0] - 0.2).toFixed(3),
+          (ref[1] - 0.25).toFixed(3),
+          (ref[0] + 0.2).toFixed(3),
+          (ref[1] + 0.25).toFixed(3),
+        ].join(",");
+        return {
+          name: params.get("name") || "custom",
+          icao: params.get("icao") || "",
+          ref,
+          runways,
+          bbox,
+        };
+      }
+    }
+    return null;
+  }
+
+  const AIRPORT = resolveAirport();
+  if (!AIRPORT) {
+    document.getElementById("app").innerHTML = `
+      <div id="error" style="margin:24px;max-width:600px">
+        <b>missing airport</b><br><br>
+        Pick one of the builtin airports:
+        <code>?airport=lga</code>, <code>?airport=jfk</code>, <code>?airport=ewr</code>
+        <br><br>
+        Or pass a custom one:
+        <code>?ref=LAT,LON&amp;runways=NAME:TRUE_COURSE,…</code>
+        <br><br>
+        Examples:
+        <pre>
+?airport=lga
+?airport=lga&amp;me=40.78,-73.96
+?ref=40.69,-74.17&amp;runways=04:27,22:207,11:97,29:277&amp;name=EWR
+        </pre>
+      </div>`;
+    throw new Error("no airport configured");
+  }
+
+  // User location: ?me=lat,lon. Defaults to the airport reference so the
+  // page is always usable, even without a viewpoint — the user just sees
+  // approach traffic from the runway's perspective.
   const meStr = params.get("me");
   const ME = meStr && meStr.split(",").length === 2
     ? meStr.split(",").map(Number)
-    : [40.70214469662103, -73.98261621204223];
+    : AIRPORT.ref.slice();
 
-  // LaGuardia airport reference point.
-  const LGA = [40.7769, -73.8740];
-
-  // LGA's four runway approach courses (the heading an arriving
-  // aircraft must be flying as they cross the threshold). True north;
-  // magnetic declination at NYC is ~-13°.
-  const APPROACH_COURSES_TRUE = [
-    { runway: "04", course: 27 },
-    { runway: "22", course: 207 },
-    { runway: "13", course: 117 },
-    { runway: "31", course: 297 },
-  ];
+  const AIRPORT_REF = AIRPORT.ref;
+  const APPROACH_COURSES_TRUE = AIRPORT.runways;
 
   // Distance limits.
   const MAX_RANGE_NM = 15;     // beyond this we ignore even with low alt
   const MAX_APPROACH_ALT = 6000;
   const APPROACH_HEADING_TOL = 25; // deg
+
+  // Reflect the chosen airport in the page chrome.
+  document.title = `${AIRPORT.name} approach watch — rs1090`;
+  document.getElementById("title").textContent = `${AIRPORT.name} approach watch`;
+  document.getElementById("subtitle").textContent =
+    `aircraft on final${AIRPORT.icao ? ` to ${AIRPORT.icao}` : ""}, visible from you`;
+  document.getElementById("airport-label").textContent = AIRPORT.name;
 
   // --- Geo math ---------------------------------------------------------------
 
@@ -159,7 +277,7 @@
 
   // --- Approach classifier ---------------------------------------------------
 
-  // Given an aircraft's track, return the matching LGA runway (or null).
+  // Given an aircraft's track, return the matching runway (or null).
   function approachRunway(track) {
     if (!Number.isFinite(track)) return null;
     let best = null;
@@ -173,7 +291,7 @@
   }
 
   function isOnApproach(a) {
-    if (!Number.isFinite(a.distLga) || a.distLga > MAX_RANGE_NM) return false;
+    if (!Number.isFinite(a.distApt) || a.distApt > MAX_RANGE_NM) return false;
     if (a.alt_ft == null || a.alt_ft > MAX_APPROACH_ALT) return false;
     if (approachRunway(a.track) === null) return false;
     // Reject climbing aircraft — track direction alone can't separate
@@ -193,14 +311,14 @@
   // --- Map setup --------------------------------------------------------------
 
   const map = L.map("map", { zoomControl: true, attributionControl: true })
-    .setView(LGA, 11);
+    .setView(AIRPORT_REF, 11);
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
     attribution: "&copy; OpenStreetMap &copy; CARTO",
     subdomains: "abcd",
     maxZoom: 19,
   }).addTo(map);
 
-  // Pins for user + LGA.
+  // Pins for user + airport.
   function pinIcon(cls, label) {
     return L.divIcon({
       className: "",
@@ -210,11 +328,11 @@
     });
   }
   L.marker(ME, { icon: pinIcon("user", "you") }).addTo(map);
-  L.marker(LGA, { icon: pinIcon("lga", "LGA") }).addTo(map);
-  L.polyline([ME, LGA], { color: "#fbbf24", weight: 1.5, opacity: 0.4, dashArray: "4 5" }).addTo(map);
+  L.marker(AIRPORT_REF, { icon: pinIcon("airport", AIRPORT.name) }).addTo(map);
+  L.polyline([ME, AIRPORT_REF], { color: "#fbbf24", weight: 1.5, opacity: 0.4, dashArray: "4 5" }).addTo(map);
 
-  // Fit view to include user + LGA, with margin.
-  map.fitBounds(L.latLngBounds([ME, LGA]), { padding: [60, 60] });
+  // Fit view to include user + airport, with margin.
+  map.fitBounds(L.latLngBounds([ME, AIRPORT_REF]), { padding: [60, 60] });
 
   // --- Aircraft state --------------------------------------------------------
 
@@ -257,7 +375,7 @@
 
   function recompute(a) {
     if (Number.isFinite(a.lat) && Number.isFinite(a.lon)) {
-      a.distLga = haversineNm([a.lat, a.lon], LGA);
+      a.distApt = haversineNm([a.lat, a.lon], AIRPORT_REF);
       a.distMe = haversineNm([a.lat, a.lon], ME);
       a.bearingFromMe = bearingDeg(ME, [a.lat, a.lon]);
       a.compassFromMe = compass(a.bearingFromMe);
@@ -286,7 +404,7 @@
     const vr = vr_fpm != null ? (vr_fpm >= 0 ? `+${vr_fpm}` : vr_fpm) + " fpm" : "—";
     const trk = Number.isFinite(a.track) ? `${a.track.toFixed(0)}°` : "—";
     const alt = a.alt_ft != null ? `${a.alt_ft.toLocaleString()} ft${a.alt_source ? ` (${a.alt_source})` : ""}` : "—";
-    const distLga = Number.isFinite(a.distLga) ? `${a.distLga.toFixed(1)} nm` : "—";
+    const distApt = Number.isFinite(a.distApt) ? `${a.distApt.toFixed(1)} nm` : "—";
     const distMe = Number.isFinite(a.distMe) ? `${a.distMe.toFixed(1)} nm ${a.compassFromMe}` : "—";
     const cs = a.callsign ? `<b>${escapeHtml(a.callsign)}</b>` : "<i>no callsign</i>";
     const tag = a.approachRunway ? `<span style="color:#4ade80">→ ${a.approachRunway}</span>` : "";
@@ -295,7 +413,7 @@
         <tr><td>altitude</td><td>${alt}</td></tr>
         <tr><td>track / speed</td><td>${trk} / ${knots}</td></tr>
         <tr><td>v/s</td><td>${vr}</td></tr>
-        <tr><td>from LGA</td><td>${distLga}</td></tr>
+        <tr><td>from ${escapeHtml(AIRPORT.name)}</td><td>${distApt}</td></tr>
         <tr><td>from you</td><td>${distMe}</td></tr>
       </table>`;
   }
@@ -309,9 +427,9 @@
   const runwayGuessEl = document.getElementById("runway-guess");
   const aircraftList = document.getElementById("aircraft");
 
-  // Stat: distance from user to LGA (one-shot, immutable).
-  document.getElementById("lga").textContent =
-    `${LGA[0].toFixed(4)}, ${LGA[1].toFixed(4)} · ${haversineNm(ME, LGA).toFixed(1)} nm · ${compass(bearingDeg(ME, LGA))}`;
+  // Stat: distance from user to airport (one-shot, immutable).
+  document.getElementById("airport-stats").textContent =
+    `${AIRPORT_REF[0].toFixed(4)}, ${AIRPORT_REF[1].toFixed(4)} · ${haversineNm(ME, AIRPORT_REF).toFixed(1)} nm · ${compass(bearingDeg(ME, AIRPORT_REF))}`;
   document.getElementById("you").textContent = `${ME[0].toFixed(4)}, ${ME[1].toFixed(4)}`;
 
   function setStatus(text, cls) {
@@ -327,8 +445,8 @@
 
     for (const a of aircraft.values()) {
       tracked++;
-      if (!Number.isFinite(a.distLga)) continue;
-      if (a.distLga <= MAX_RANGE_NM && a.alt_ft != null && a.alt_ft <= MAX_APPROACH_ALT) {
+      if (!Number.isFinite(a.distApt)) continue;
+      if (a.distApt <= MAX_RANGE_NM && a.alt_ft != null && a.alt_ft <= MAX_APPROACH_ALT) {
         lowNear++;
         nearby.push(a);
       }
@@ -381,10 +499,9 @@
 
   // --- Seed + subscribe -------------------------------------------------------
 
-  // Bound the SSE subscription to the LGA approach corridor. Saves both
-  // bandwidth and JS work on the client.
-  const BBOX = "40.55,-74.15,40.95,-73.65";
-  const STREAM_URL = `/stream?bbox=${BBOX}&alt_max=${MAX_APPROACH_ALT + 2000}`;
+  // Bound the SSE subscription to the chosen airport's approach
+  // corridor. Saves both bandwidth and JS work on the client.
+  const STREAM_URL = `/stream?bbox=${encodeURIComponent(AIRPORT.bbox)}&alt_max=${MAX_APPROACH_ALT + 2000}`;
 
   async function seedFromSnapshot() {
     try {
@@ -405,7 +522,7 @@
           a.vr_mps = s.velocity.vr_mps ?? a.vr_mps;
         }
         recompute(a);
-        if (Number.isFinite(a.distLga) && a.distLga <= MAX_RANGE_NM + 5) {
+        if (Number.isFinite(a.distApt) && a.distApt <= MAX_RANGE_NM + 5) {
           refreshMarker(a);
         }
       }

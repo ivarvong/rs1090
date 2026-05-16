@@ -23,7 +23,7 @@ use crate::events::{AircraftSnapshot, EventEnvelope};
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/lga", get(lga))
+        .route("/approach", get(approach))
         .route("/healthz", get(healthz))
         .route("/aircraft", get(list_aircraft))
         .route("/aircraft/:icao", get(get_aircraft))
@@ -41,16 +41,20 @@ async fn index() -> Response {
     ([("content-type", "text/html; charset=utf-8")], INDEX_HTML).into_response()
 }
 
-/// Purpose-built page: aircraft on approach to LGA, ranked by distance
-/// from the viewer's vantage point. User location is hardcoded to the
-/// development host's coordinates but overridable via `?me=lat,lon`.
+/// Purpose-built approach-watch page. The airport is selected entirely
+/// via query parameters — either `?airport=lga|jfk|ewr` (builtin
+/// table inside the page) or a fully custom `?ref=LAT,LON&runways=…`.
 /// All the approach detection (runway-course matching, range/altitude
-/// gating) happens in the browser against the existing `/stream` SSE
-/// data — no server-side LGA-specific code.
-const LGA_HTML: &str = include_str!("../static/lga.html");
+/// gating, descent gate) happens in the browser against the existing
+/// `/stream` SSE feed — no airport-specific server-side code.
+const APPROACH_HTML: &str = include_str!("../static/approach.html");
 
-async fn lga() -> Response {
-    ([("content-type", "text/html; charset=utf-8")], LGA_HTML).into_response()
+async fn approach() -> Response {
+    (
+        [("content-type", "text/html; charset=utf-8")],
+        APPROACH_HTML,
+    )
+        .into_response()
 }
 
 /// Returns 200 OK / `"ok"` while the decoder thread is alive, 503
