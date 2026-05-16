@@ -17,6 +17,7 @@ mod ble;
 
 use std::fs::File;
 use std::io::BufReader;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -36,6 +37,10 @@ use crate::events::{from_state_event, EventEnvelope};
 
 #[derive(Parser, Debug)]
 #[command(name = "rs1090-serve", version, about = "HTTP/SSE for rs1090")]
+// Clap's argument struct naturally accumulates booleans as we add
+// optional outputs (BLE, GDL90, AVR, Beast, …). The struct-of-bools
+// shape *is* the desired shape — clippy's heuristic doesn't apply.
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Address to bind. Defaults to loopback for safety.
     #[arg(long, default_value = "127.0.0.1:8080")]
@@ -68,15 +73,23 @@ struct Cli {
     #[arg(long, value_parser = clap::value_parser!(std::net::SocketAddr))]
     gdl90_target: Option<std::net::SocketAddr>,
 
-    /// Serve AVR-text (dump1090 `--raw` shape) over TCP. Optional
-    /// `[BIND_ADDR]:PORT`; defaults to `0.0.0.0:30002`.
-    #[arg(long, num_args = 0..=1, default_missing_value = "0.0.0.0:30002", value_parser = clap::value_parser!(std::net::SocketAddr))]
-    avr: Option<std::net::SocketAddr>,
+    /// Serve AVR-text (dump1090 `--raw` shape) over TCP at
+    /// `0.0.0.0:30002`. Override the address with `--avr-bind`.
+    #[arg(long)]
+    avr: bool,
 
-    /// Serve Beast binary (dump1090-fa `--net-bo-port`) over TCP.
-    /// Optional `[BIND_ADDR]:PORT`; defaults to `0.0.0.0:30005`.
-    #[arg(long, num_args = 0..=1, default_missing_value = "0.0.0.0:30005", value_parser = clap::value_parser!(std::net::SocketAddr))]
-    beast: Option<std::net::SocketAddr>,
+    /// Override the AVR TCP bind address. Implies `--avr`.
+    #[arg(long, value_parser = clap::value_parser!(std::net::SocketAddr))]
+    avr_bind: Option<std::net::SocketAddr>,
+
+    /// Serve Beast binary (dump1090-fa `--net-bo-port`) over TCP at
+    /// `0.0.0.0:30005`. Override with `--beast-bind`.
+    #[arg(long)]
+    beast: bool,
+
+    /// Override the Beast TCP bind address. Implies `--beast`.
+    #[arg(long, value_parser = clap::value_parser!(std::net::SocketAddr))]
+    beast_bind: Option<std::net::SocketAddr>,
 
     #[command(subcommand)]
     source: Source,
@@ -139,8 +152,16 @@ fn main() -> Result<()> {
         (true, None) => Some(gdl90::DEFAULT_TARGET),
         (false, None) => None,
     };
-    let avr_bind = cli.avr;
-    let beast_bind = cli.beast;
+    let avr_bind = match (cli.avr, cli.avr_bind) {
+        (_, Some(addr)) => Some(addr),
+        (true, None) => Some(SocketAddr::from(([0, 0, 0, 0], avr::DEFAULT_PORT))),
+        (false, None) => None,
+    };
+    let beast_bind = match (cli.beast, cli.beast_bind) {
+        (_, Some(addr)) => Some(addr),
+        (true, None) => Some(SocketAddr::from(([0, 0, 0, 0], beast::DEFAULT_PORT))),
+        (false, None) => None,
+    };
 
     // Warn loudly when bound publicly per DESIGN.md §12.8.
     if !bind.starts_with("127.0.0.1")
