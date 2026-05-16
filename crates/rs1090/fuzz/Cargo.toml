@@ -1,0 +1,27 @@
+[package]
+name = "rs1090-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Fuzz crate lives outside the main workspace: it pulls in libfuzzer-sys
+# and a forest of LLVM-flavoured build flags that we don't want bleeding
+# into normal `cargo build` / `cargo test` from the repo root.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rs1090]
+path = ".."
+features = ["test-utils"]
+
+[[bin]]
+name = "decode_message"
+path = "fuzz_targets/decode_message.rs"
+test = false
+doc = false
+bench = false

@@ -3,11 +3,14 @@ target/
 Cargo.lock.bak
 .DS_Store
 *.iq
-# Note: `corpus/` is gitignored. Live captures are too large and too
+# Top-level `corpus/` holds live IQ captures: too large and too
 # non-deterministic to commit. When we identify a known-good slice that
 # exercises a specific decoder path, extract a minimal fixture and
 # commit it under `crates/rs1090/tests/fixtures/` instead.
-corpus/
+#
+# The leading `/` anchors this to the repo root so `fuzz/corpus/` — our
+# committed libFuzzer seed corpus — is unaffected.
+/corpus/
 .idea/
 .vscode/
 *.swp

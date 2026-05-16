@@ -1,0 +1,8 @@
+target/
+artifacts/
+coverage/
+# `corpus/` is libFuzzer's working directory — populated automatically
+# from `seeds/` on first run, then grown by the fuzzer with interesting
+# mutations. Deliberate seeds (real frames from a live capture) live in
+# `seeds/` and are committed; the working corpus is not.
+corpus/
