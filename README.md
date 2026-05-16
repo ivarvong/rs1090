@@ -65,7 +65,10 @@ scripts/diff_pymodes.py corpus/<some>.iq
 
 # libFuzzer harness for the message decoder (requires nightly +
 # cargo-fuzz). Seeded with real frames; runs at ~1M exec/s on M-series.
-cd crates/rs1090/fuzz && cargo +nightly fuzz run decode_message seeds/decode_message
+cd crates/rs1090/fuzz
+mkdir -p corpus/decode_message
+cp -n seeds/decode_message/* corpus/decode_message/   # first run only
+cargo +nightly fuzz run decode_message
 ```
 
 ## License

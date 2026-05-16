@@ -4,14 +4,20 @@
 //! any input that causes a panic — integer overflow, slice OOB, unwrap
 //! on `None`, debug-assert, etc.
 //!
-//! Run via
+//! First-time setup (from `crates/rs1090/fuzz`):
 //!
-//!     cargo +nightly fuzz run decode_message seeds/decode_message
+//!     mkdir -p corpus/decode_message
+//!     cp -n seeds/decode_message/* corpus/decode_message/
 //!
-//! from `crates/rs1090/fuzz`. The committed `seeds/decode_message/`
-//! directory contains real frames extracted from a live capture; on
-//! first invocation libFuzzer copies these into its working `corpus/`
-//! (gitignored) and grows it from there.
+//! Then on every run:
+//!
+//!     cargo +nightly fuzz run decode_message
+//!
+//! `seeds/decode_message/` is the committed read-only seed corpus
+//! (real frames from a live capture); `corpus/decode_message/` is
+//! libFuzzer's writable working directory, gitignored. The one-shot
+//! seed copy keeps the canonical seed set immutable while letting
+//! libFuzzer accumulate coverage-discovered inputs across runs.
 //!
 //! Each input is a flat byte buffer; we accept both short (7-byte) and
 //! long (14-byte) frame shapes, mapping any other length to "skip" so
