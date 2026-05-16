@@ -5,7 +5,7 @@ members = ["crates/rs1090", "crates/rs1090-cli", "crates/rs1090-serve"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/ivarvong/rs1090"
 authors = ["Ivar Vong <ivar@ivarvong.com>"]

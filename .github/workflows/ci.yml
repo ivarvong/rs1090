@@ -10,7 +10,7 @@
 #   - docs                        — `cargo doc` warnings rejected so
 #                                   rustdoc rot is caught at PR time.
 #
-# The MSRV is pinned in `rust-version = "1.85"` at the workspace
+# The MSRV is pinned in `rust-version = "1.88"` at the workspace
 # level. The MSRV row catches accidental use of newer compiler
 # features in dependency updates — if it fails, either bump
 # `rust-version` (with a CHANGELOG note explaining why) or pin the
@@ -41,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.85"]
+        toolchain: [stable, "1.88"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

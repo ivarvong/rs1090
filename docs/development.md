@@ -5,8 +5,8 @@ and what to run before opening a PR.
 
 ## Prerequisites
 
-- **Rust 1.85+** via `rustup`. The MSRV is pinned in
-  `Cargo.toml` (`rust-version = "1.85"`); CI rejects PRs that need a
+- **Rust 1.88+** via `rustup`. The MSRV is pinned in
+  `Cargo.toml` (`rust-version = "1.88"`); CI rejects PRs that need a
   newer compiler unless `rust-version` is bumped in the same PR with
   rationale.
 - **No system C dependencies** for the default build. The RTL-SDR
