@@ -133,7 +133,7 @@
   function ensureAircraft(icao) {
     let a = aircraft.get(icao);
     if (!a) {
-      a = { icao, marker: null, callsign: null, lat: null, lon: null, track: null, gs_mps: null, vr_mps: null, lastUpdate: Date.now() };
+      a = { icao, marker: null, callsign: null, lat: null, lon: null, alt_ft: null, alt_source: null, track: null, gs_mps: null, vr_mps: null, lastUpdate: Date.now() };
       aircraft.set(icao, a);
     }
     return a;
@@ -156,11 +156,15 @@
     const vr_fpm = a.vr_mps != null ? Math.round(a.vr_mps * 196.85) : null;
     const vr = vr_fpm != null ? (vr_fpm >= 0 ? `+${vr_fpm}` : vr_fpm) + " fpm" : "—";
     const trk = Number.isFinite(a.track) ? a.track.toFixed(0) + "°" : "—";
+    const alt = a.alt_ft != null
+      ? `${a.alt_ft.toLocaleString()} ft${a.alt_source ? ` (${a.alt_source})` : ""}`
+      : "—";
     const cs = a.callsign ? `<b>${escapeHtml(a.callsign)}</b>` : "<i>no callsign</i>";
     return `
       <div><b>${escapeHtml(a.icao)}</b> &mdash; ${cs}</div>
       <table>
         <tr><td>lat,lon</td><td>${a.lat.toFixed(4)}, ${a.lon.toFixed(4)}</td></tr>
+        <tr><td>altitude</td><td>${alt}</td></tr>
         <tr><td>track</td><td>${trk}</td></tr>
         <tr><td>speed</td><td>${knots}</td></tr>
         <tr><td>v/s</td><td>${vr}</td></tr>
@@ -216,7 +220,12 @@
       for (const s of list) {
         const a = ensureAircraft(s.icao);
         a.callsign = s.callsign || a.callsign;
-        if (s.position) { a.lat = s.position.lat; a.lon = s.position.lon; }
+        if (s.position) {
+          a.lat = s.position.lat;
+          a.lon = s.position.lon;
+          if (s.position.alt_ft != null) a.alt_ft = s.position.alt_ft;
+          if (s.position.alt_source != null) a.alt_source = s.position.alt_source;
+        }
         if (s.velocity) {
           a.track = s.velocity.track_deg ?? s.velocity.heading_deg ?? a.track;
           a.gs_mps = s.velocity.gs_mps ?? a.gs_mps;
@@ -255,6 +264,8 @@
       const d = JSON.parse(ev.data);
       const a = ensureAircraft(d.icao);
       a.lat = d.lat; a.lon = d.lon;
+      if (d.alt_ft != null) a.alt_ft = d.alt_ft;
+      if (d.alt_source != null) a.alt_source = d.alt_source;
       a.lastUpdate = Date.now();
       refreshMarker(a);
       scheduleAutoFit();

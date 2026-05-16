@@ -198,8 +198,12 @@ pub struct Identification {
     pub category: u8,
 }
 
-/// Altitude reported in feet, plus a flag indicating the source.
+/// Altitude reported in feet, tagged with its encoding/source.
+///
+/// Marked `#[non_exhaustive]` so we can add encodings (e.g. pressure
+/// altitude variants from DF 4/20) without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Altitude {
     /// Barometric altitude in feet, encoded with the Q-bit (25 ft resolution).
     BaroFeet(i32),
@@ -210,6 +214,33 @@ pub enum Altitude {
     GnssFeet(i32),
     /// Altitude field was all zeros — the aircraft is not reporting.
     Unavailable,
+}
+
+impl Altitude {
+    /// Numeric value in feet, regardless of encoding. `None` for
+    /// [`Altitude::Unavailable`].
+    #[inline]
+    #[must_use]
+    pub const fn feet(self) -> Option<i32> {
+        match self {
+            Self::BaroFeet(ft) | Self::BaroGillhamFeet(ft) | Self::GnssFeet(ft) => Some(ft),
+            Self::Unavailable => None,
+        }
+    }
+
+    /// Stable wire-format tag for the altitude source: `"baro"` (Q-bit or
+    /// Gillham) or `"gnss"`. `None` for [`Altitude::Unavailable`]. The
+    /// compiler enforces exhaustive matching here so adding a new
+    /// variant fires a build error in exactly one place.
+    #[inline]
+    #[must_use]
+    pub const fn source_tag(self) -> Option<&'static str> {
+        match self {
+            Self::BaroFeet(_) | Self::BaroGillhamFeet(_) => Some("baro"),
+            Self::GnssFeet(_) => Some("gnss"),
+            Self::Unavailable => None,
+        }
+    }
 }
 
 /// Airborne position (TC 9–18, 20–22).

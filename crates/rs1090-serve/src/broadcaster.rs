@@ -61,7 +61,9 @@ pub fn snapshot_from(a: &Aircraft) -> AircraftSnapshot {
         position: a.position.map(|p| SnapshotPosition {
             lat: p.pos.lat_deg,
             lon: p.pos.lon_deg,
-            source: p.source.wire_tag(),
+            alt_ft: p.altitude.feet(),
+            alt_source: p.altitude.source_tag(),
+            source: p.source,
         }),
         velocity: a.velocity.map(SnapshotVelocity::from_velocity),
         counters: SnapshotCounters {

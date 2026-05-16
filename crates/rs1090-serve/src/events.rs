@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use rs1090::frame::DownlinkFormat;
 use rs1090::message::{Icao, Velocity, VelocityKind};
-use rs1090::state::StateEvent;
+use rs1090::state::{PositionSource, StateEvent};
 
 /// Wire-format event envelope. Each variant becomes one SSE event with
 /// `event: <tag>` and `data: <json>`.
@@ -97,7 +97,15 @@ pub struct AircraftPosition {
     pub icao: Icao,
     pub lat: f64,
     pub lon: f64,
-    pub source: &'static str,
+    /// Altitude in feet, regardless of encoding. Absent when the
+    /// aircraft did not report an altitude.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_ft: Option<i32>,
+    /// `"baro"` or `"gnss"`. Absent when `alt_ft` is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_source: Option<&'static str>,
+    #[serde(serialize_with = "ser_position_source")]
+    pub source: PositionSource,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +165,14 @@ fn ser_icao<S: serde::Serializer>(icao: &Icao, s: S) -> Result<S::Ok, S::Error> 
     s.serialize_str(icao.to_hex().as_str())
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn ser_position_source<S: serde::Serializer>(
+    p: &PositionSource,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_str(p.wire_tag())
+}
+
 // --- Conversion helpers -----------------------------------------------------
 
 const KT_TO_MPS: f64 = 0.514_444;
@@ -179,14 +195,18 @@ pub fn from_state_event(ev: &StateEvent, now_iso: &str) -> Option<Event> {
                 callsign: callsign.to_string(),
             })
         }
-        StateEvent::Position { icao, pos, source } => Event::Position(AircraftPosition {
-            v: 1,
-            t: t(),
-            icao: *icao,
-            lat: pos.lat_deg,
-            lon: pos.lon_deg,
-            source: source.wire_tag(),
-        }),
+        StateEvent::Position { icao, pos, altitude, source } => {
+            Event::Position(AircraftPosition {
+                v: 1,
+                t: t(),
+                icao: *icao,
+                lat: pos.lat_deg,
+                lon: pos.lon_deg,
+                alt_ft: altitude.feet(),
+                alt_source: altitude.source_tag(),
+                source: *source,
+            })
+        }
         StateEvent::Velocity { icao, velocity } => {
             Event::Velocity(velocity_to_wire(*icao, *velocity, &t()))
         }
@@ -279,7 +299,12 @@ pub struct AircraftSnapshot {
 pub struct SnapshotPosition {
     pub lat: f64,
     pub lon: f64,
-    pub source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_ft: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_source: Option<&'static str>,
+    #[serde(serialize_with = "ser_position_source")]
+    pub source: PositionSource,
 }
 
 
@@ -341,7 +366,9 @@ mod tests {
             icao: Icao::from_bytes([0xA1, 0xB2, 0xC3]),
             lat: 40.6413,
             lon: -73.7781,
-            source: "global",
+            alt_ft: Some(25_000),
+            alt_source: Some("baro"),
+            source: PositionSource::Global,
         });
         let j: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(j["event"], "position");
@@ -350,6 +377,8 @@ mod tests {
         assert_eq!(j["icao"], "A1B2C3");
         assert_eq!(j["lat"], 40.6413);
         assert_eq!(j["lon"], -73.7781);
+        assert_eq!(j["alt_ft"], 25_000);
+        assert_eq!(j["alt_source"], "baro");
         assert_eq!(j["source"], "global");
     }
 

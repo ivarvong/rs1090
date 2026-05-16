@@ -41,7 +41,7 @@ use arrayvec::ArrayString;
 use crate::cpr::{self, CprPosition, LatLon};
 use crate::crc::{self, CrcOutcome, LONG_FRAME_BYTES, SHORT_FRAME_BYTES};
 use crate::frame::{DownlinkFormat, Frame};
-use crate::message::{self, ExtendedSquitter, Icao, Message, SquitterPayload, Velocity};
+use crate::message::{self, Altitude, ExtendedSquitter, Icao, Message, SquitterPayload, Velocity};
 
 // --- Public types -----------------------------------------------------------
 
@@ -81,6 +81,11 @@ pub struct Aircraft {
 pub struct TimedPosition {
     pub at: Instant,
     pub pos: LatLon,
+    /// Altitude as reported in the squitter that carried this fix.
+    /// `Altitude::Unavailable` if the aircraft didn't report one (rare
+    /// for airborne messages; common for surface positions which we
+    /// don't currently decode).
+    pub altitude: Altitude,
     /// How this position was derived.
     pub source: PositionSource,
 }
@@ -144,7 +149,12 @@ pub enum StateEvent {
         callsign: ArrayString<8>,
     },
     /// New position fix (global or local).
-    Position { icao: Icao, pos: LatLon, source: PositionSource },
+    Position {
+        icao: Icao,
+        pos: LatLon,
+        altitude: Altitude,
+        source: PositionSource,
+    },
     /// New velocity vector.
     Velocity { icao: Icao, velocity: Velocity },
     /// Aircraft evicted from the table (LRU or staleness).
@@ -428,7 +438,11 @@ fn apply_extended_squitter(
             } else {
                 aircraft.cpr_even = Some(fragment);
             }
-            try_resolve_position(aircraft, at, reference, out);
+            // Pass the altitude that arrived alongside this CPR through
+            // to the resolver. Global decode may use the older fragment's
+            // lat/lon math, but the altitude we emit reflects the most
+            // recent message — which matches what consumers want.
+            try_resolve_position(aircraft, at, p.altitude, reference, out);
         }
         SquitterPayload::Velocity(v) => {
             aircraft.velocity = Some(*v);
@@ -446,6 +460,7 @@ fn apply_extended_squitter(
 fn try_resolve_position(
     aircraft: &mut Aircraft,
     at: Instant,
+    altitude: Altitude,
     reference: Option<LatLon>,
     out: &mut Vec<StateEvent>,
 ) {
@@ -459,11 +474,13 @@ fn try_resolve_position(
                     aircraft.position = Some(TimedPosition {
                         at,
                         pos,
+                        altitude,
                         source: PositionSource::Global,
                     });
                     out.push(StateEvent::Position {
                         icao: aircraft.icao,
                         pos,
+                        altitude,
                         source: PositionSource::Global,
                     });
                     return;
@@ -508,11 +525,13 @@ fn try_resolve_position(
     aircraft.position = Some(TimedPosition {
         at,
         pos,
+        altitude,
         source: PositionSource::Local,
     });
     out.push(StateEvent::Position {
         icao: aircraft.icao,
         pos,
+        altitude,
         source: PositionSource::Local,
     });
 }
@@ -684,7 +703,7 @@ mod tests {
         let pos_evt = events
             .iter()
             .find_map(|e| match e {
-                StateEvent::Position { icao: i, pos, source } if *i == icao => {
+                StateEvent::Position { icao: i, pos, source, .. } if *i == icao => {
                     Some((*pos, *source))
                 }
                 _ => None,
@@ -742,7 +761,7 @@ mod tests {
         let (pos, source) = events
             .iter()
             .find_map(|e| match e {
-                StateEvent::Position { icao: i, pos, source } if *i == icao => {
+                StateEvent::Position { icao: i, pos, source, .. } if *i == icao => {
                     Some((*pos, *source))
                 }
                 _ => None,

@@ -263,6 +263,12 @@ fn fmt_altitude(a: Altitude) -> String {
         Altitude::BaroGillhamFeet(ft) => format!("alt={ft}ft(gillham)"),
         Altitude::GnssFeet(ft) => format!("alt={ft}ft(gnss)"),
         Altitude::Unavailable => "alt=n/a".to_string(),
+        // Altitude is `#[non_exhaustive]` (forward-compat for future
+        // encodings); fall back to the source tag if any.
+        _ => match a.source_tag() {
+            Some(tag) => format!("alt=?({tag})"),
+            None => "alt=?".to_string(),
+        },
     }
 }
 
@@ -390,12 +396,12 @@ fn print_state_event<W: Write>(out: &mut W, event: &StateEvent) -> io::Result<()
         StateEvent::Identification { icao, callsign } => {
             writeln!(out, "ident   {icao} callsign={callsign}")?;
         }
-        StateEvent::Position { icao, pos, source } => {
+        StateEvent::Position { icao, pos, altitude, source } => {
             // 6-wide column-aligned tag so adjacent lines line up.
             writeln!(
                 out,
-                "pos     {icao} {:.4},{:.4} ({:<6})",
-                pos.lat_deg, pos.lon_deg, source.wire_tag(),
+                "pos     {icao} {:.4},{:.4} {} ({:<6})",
+                pos.lat_deg, pos.lon_deg, fmt_altitude(*altitude), source.wire_tag(),
             )?;
         }
         StateEvent::Velocity { icao, velocity } => {
