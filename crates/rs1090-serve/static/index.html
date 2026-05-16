@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rs1090 live</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="">
+  <style>
+    html, body { margin: 0; height: 100%; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+    #map { position: absolute; inset: 0; background: #1a1c20; }
+
+    /* Side panel */
+    #panel {
+      position: absolute; top: 12px; right: 12px; z-index: 1000;
+      width: 280px; max-height: calc(100vh - 24px); overflow: hidden;
+      display: flex; flex-direction: column;
+      background: rgba(20, 22, 26, 0.92); color: #e6e8eb;
+      border-radius: 8px; padding: 12px 14px;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    }
+    #panel h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
+    #panel .sub { color: #8b939c; font-size: 11px; margin-bottom: 10px; }
+    #count { font-size: 22px; font-weight: 600; }
+    #count small { font-size: 12px; font-weight: 400; color: #8b939c; margin-left: 4px; }
+    #status { font-size: 11px; margin-top: 6px; }
+    #status.ok::before    { content: "● "; color: #4ade80; }
+    #status.bad::before   { content: "● "; color: #f87171; }
+    #status.wait::before  { content: "● "; color: #fbbf24; }
+
+    #log-title { margin: 14px 0 4px; font-size: 11px; color: #8b939c; text-transform: uppercase; letter-spacing: 0.06em; }
+    #log { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    #log li { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    #log .icao { color: #a5b4fc; }
+    #log .tag  { color: #8b939c; margin-right: 6px; }
+
+    /* Plane marker */
+    .plane {
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      transition: transform 200ms linear;
+    }
+    .plane svg { width: 24px; height: 24px; filter: drop-shadow(0 0 2px rgba(0,0,0,0.6)); }
+    .plane .body { fill: #60a5fa; stroke: #0b1120; stroke-width: 1.2; }
+    .plane.stale .body { fill: #6b7280; }
+    .plane .label {
+      position: absolute; top: 26px; left: 50%; transform: translateX(-50%);
+      color: #e6e8eb; font-size: 10px; font-weight: 600;
+      background: rgba(20,22,26,0.85); padding: 1px 5px; border-radius: 3px;
+      white-space: nowrap; pointer-events: none;
+    }
+
+    .leaflet-popup-content-wrapper { background: #14161a; color: #e6e8eb; }
+    .leaflet-popup-content { font-size: 12px; margin: 10px 12px; }
+    .leaflet-popup-tip { background: #14161a; }
+    .leaflet-popup-content b { color: #a5b4fc; }
+    .leaflet-popup-content table { border-collapse: collapse; }
+    .leaflet-popup-content td { padding: 1px 4px; }
+    .leaflet-popup-content td:first-child { color: #8b939c; }
+    .leaflet-control-attribution { background: rgba(20,22,26,0.7) !important; color: #8b939c !important; }
+    .leaflet-control-attribution a { color: #a5b4fc !important; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="panel">
+    <h1>rs1090 live</h1>
+    <div class="sub">Mode S / ADS-B over SSE</div>
+    <div id="count">0<small>aircraft</small></div>
+    <div id="status" class="wait">connecting…</div>
+    <div id="log-title">recent events</div>
+    <ul id="log"></ul>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script>
+  "use strict";
+
+  // --- Map setup --------------------------------------------------------------
+
+  const map = L.map("map", { zoomControl: true, attributionControl: true })
+    .setView([20, 0], 2);
+
+  // CartoDB Dark Matter — free tiles, dark theme, no API key needed.
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    subdomains: "abcd",
+    maxZoom: 19,
+  }).addTo(map);
+
+  // --- State ------------------------------------------------------------------
+
+  /** Map<icao, { marker, callsign, lat, lon, track, gs, lastUpdate }> */
+  const aircraft = new Map();
+  /** Whether we still want to auto-fit bounds to all known aircraft. */
+  let autoFit = true;
+  /** Timeout id for the next pending auto-fit (debounced). */
+  let autoFitTimer = null;
+
+  // Stop auto-fitting as soon as the user touches the map.
+  map.on("dragstart zoomstart", () => { autoFit = false; });
+
+  function planeIconHtml(callsign, track) {
+    const rot = Number.isFinite(track) ? track : 0;
+    const label = callsign ? `<div class="label">${escapeHtml(callsign)}</div>` : "";
+    return `
+      <div class="plane" style="transform: rotate(${rot}deg);">
+        <svg viewBox="-12 -12 24 24"><path class="body" d="M0,-10 L7,8 L0,4 L-7,8 Z"/></svg>
+        ${label}
+      </div>`;
+  }
+
+  function makeIcon(callsign, track) {
+    return L.divIcon({
+      className: "",            // no leaflet default styling
+      html: planeIconHtml(callsign, track),
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // --- Marker / popup management ----------------------------------------------
+
+  function ensureAircraft(icao) {
+    let a = aircraft.get(icao);
+    if (!a) {
+      a = { icao, marker: null, callsign: null, lat: null, lon: null, track: null, gs_mps: null, vr_mps: null, lastUpdate: Date.now() };
+      aircraft.set(icao, a);
+    }
+    return a;
+  }
+
+  function refreshMarker(a) {
+    if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
+    if (!a.marker) {
+      a.marker = L.marker([a.lat, a.lon], { icon: makeIcon(a.callsign, a.track) }).addTo(map);
+      a.marker.bindPopup(() => popupHtml(a));
+    } else {
+      a.marker.setLatLng([a.lat, a.lon]);
+      a.marker.setIcon(makeIcon(a.callsign, a.track));
+      if (a.marker.isPopupOpen()) a.marker.getPopup().setContent(popupHtml(a));
+    }
+  }
+
+  function popupHtml(a) {
+    const knots = a.gs_mps != null ? (a.gs_mps * 1.94384).toFixed(0) + " kt" : "—";
+    const vr_fpm = a.vr_mps != null ? Math.round(a.vr_mps * 196.85) : null;
+    const vr = vr_fpm != null ? (vr_fpm >= 0 ? `+${vr_fpm}` : vr_fpm) + " fpm" : "—";
+    const trk = Number.isFinite(a.track) ? a.track.toFixed(0) + "°" : "—";
+    const cs = a.callsign ? `<b>${escapeHtml(a.callsign)}</b>` : "<i>no callsign</i>";
+    return `
+      <div><b>${escapeHtml(a.icao)}</b> &mdash; ${cs}</div>
+      <table>
+        <tr><td>lat,lon</td><td>${a.lat.toFixed(4)}, ${a.lon.toFixed(4)}</td></tr>
+        <tr><td>track</td><td>${trk}</td></tr>
+        <tr><td>speed</td><td>${knots}</td></tr>
+        <tr><td>v/s</td><td>${vr}</td></tr>
+      </table>`;
+  }
+
+  // --- Bounds auto-fit (debounced) --------------------------------------------
+
+  function scheduleAutoFit() {
+    if (!autoFit) return;
+    clearTimeout(autoFitTimer);
+    autoFitTimer = setTimeout(() => {
+      if (!autoFit) return;
+      const pts = [];
+      for (const a of aircraft.values()) {
+        if (Number.isFinite(a.lat) && Number.isFinite(a.lon)) pts.push([a.lat, a.lon]);
+      }
+      if (pts.length === 0) return;
+      const bounds = L.latLngBounds(pts);
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 11 });
+    }, 400);
+  }
+
+  // --- Panel UI ---------------------------------------------------------------
+
+  const countEl = document.getElementById("count");
+  const statusEl = document.getElementById("status");
+  const logEl = document.getElementById("log");
+
+  function updateCount() {
+    countEl.firstChild.nodeValue = String(aircraft.size);
+  }
+
+  function setStatus(text, cls) {
+    statusEl.className = cls;
+    statusEl.textContent = text;
+  }
+
+  function logEvent(tag, icao, detail) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="tag">${tag}</span><span class="icao">${escapeHtml(icao || "")}</span>${detail ? " " + escapeHtml(detail) : ""}`;
+    logEl.prepend(li);
+    while (logEl.children.length > 80) logEl.removeChild(logEl.lastChild);
+  }
+
+  // --- Seed from snapshot, then open SSE --------------------------------------
+
+  async function seedFromSnapshot() {
+    try {
+      const r = await fetch("/aircraft");
+      if (!r.ok) return;
+      const list = await r.json();
+      for (const s of list) {
+        const a = ensureAircraft(s.icao);
+        a.callsign = s.callsign || a.callsign;
+        if (s.position) { a.lat = s.position.lat; a.lon = s.position.lon; }
+        if (s.velocity) {
+          a.track = s.velocity.track_deg ?? s.velocity.heading_deg ?? a.track;
+          a.gs_mps = s.velocity.gs_mps ?? a.gs_mps;
+          a.vr_mps = s.velocity.vr_mps ?? a.vr_mps;
+        }
+        refreshMarker(a);
+      }
+      updateCount();
+      scheduleAutoFit();
+    } catch (e) { /* server may not be ready yet — SSE will populate */ }
+  }
+
+  function openStream() {
+    setStatus("connecting…", "wait");
+    const es = new EventSource("/stream");
+    es.addEventListener("open", () => setStatus("connected", "ok"));
+    es.addEventListener("error", () => setStatus("disconnected — reconnecting…", "bad"));
+
+    es.addEventListener("acquired", (ev) => {
+      const d = JSON.parse(ev.data);
+      ensureAircraft(d.icao);
+      updateCount();
+      logEvent("acquired", d.icao);
+    });
+
+    es.addEventListener("identification", (ev) => {
+      const d = JSON.parse(ev.data);
+      const a = ensureAircraft(d.icao);
+      a.callsign = d.callsign;
+      a.lastUpdate = Date.now();
+      refreshMarker(a);
+      logEvent("ident", d.icao, d.callsign);
+    });
+
+    es.addEventListener("position", (ev) => {
+      const d = JSON.parse(ev.data);
+      const a = ensureAircraft(d.icao);
+      a.lat = d.lat; a.lon = d.lon;
+      a.lastUpdate = Date.now();
+      refreshMarker(a);
+      scheduleAutoFit();
+      logEvent("pos", d.icao, `${d.lat.toFixed(3)}, ${d.lon.toFixed(3)}`);
+    });
+
+    es.addEventListener("velocity", (ev) => {
+      const d = JSON.parse(ev.data);
+      const a = ensureAircraft(d.icao);
+      if (d.track_deg != null) a.track = d.track_deg;
+      else if (d.heading_deg != null) a.track = d.heading_deg;
+      if (d.gs_mps != null) a.gs_mps = d.gs_mps;
+      if (d.vr_mps != null) a.vr_mps = d.vr_mps;
+      a.lastUpdate = Date.now();
+      refreshMarker(a);
+    });
+
+    es.addEventListener("lost", (ev) => {
+      const d = JSON.parse(ev.data);
+      const a = aircraft.get(d.icao);
+      if (a && a.marker) map.removeLayer(a.marker);
+      aircraft.delete(d.icao);
+      updateCount();
+      logEvent("lost", d.icao);
+    });
+
+    return es;
+  }
+
+  // --- Stale fade -------------------------------------------------------------
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const a of aircraft.values()) {
+      if (!a.marker) continue;
+      const stale = (now - a.lastUpdate) > 30_000;
+      const el = a.marker.getElement();
+      if (!el) continue;
+      const plane = el.querySelector(".plane");
+      if (!plane) continue;
+      plane.classList.toggle("stale", stale);
+    }
+  }, 5_000);
+
+  // --- Go ---------------------------------------------------------------------
+
+  seedFromSnapshot();
+  openStream();
+  </script>
+</body>
+</html>

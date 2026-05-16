@@ -22,11 +22,26 @@ use crate::events::{AircraftSnapshot, EventEnvelope};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(index))
         .route("/healthz", get(healthz))
         .route("/aircraft", get(list_aircraft))
         .route("/aircraft/:icao", get(get_aircraft))
         .route("/stream", get(stream))
         .with_state(state)
+}
+
+/// Single-page live map. Static HTML/CSS/JS embedded at compile time so
+/// the binary stays self-contained; Leaflet is pulled from a CDN at
+/// page-load time (the only runtime dependency). Talks to `/aircraft`
+/// once for a snapshot, then `/stream` for live updates.
+const INDEX_HTML: &str = include_str!("../static/index.html");
+
+async fn index() -> Response {
+    (
+        [("content-type", "text/html; charset=utf-8")],
+        INDEX_HTML,
+    )
+        .into_response()
 }
 
 async fn healthz() -> &'static str {
