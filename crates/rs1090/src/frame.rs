@@ -194,6 +194,42 @@ impl Frame {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Build a `Frame` directly from a 7- or 14-byte payload, computing
+    /// its `DF` and CRC outcome on the fly. Confidence is set to
+    /// `u8::MAX` — there is no per-bit margin to derive without a
+    /// demodulator slicer.
+    ///
+    /// Only available with the `test-utils` feature. Production frames
+    /// come from [`FrameDetector::process`], which carries the real
+    /// confidence value from the slicer. This constructor exists so
+    /// fuzz targets and integration tests can feed known byte sequences
+    /// to [`crate::message::decode`] without re-synthesising the demod
+    /// path.
+    ///
+    /// # Panics
+    /// Panics if `bytes.len()` is not [`SHORT_FRAME_BYTES`] (7) or
+    /// [`LONG_FRAME_BYTES`] (14).
+    #[cfg(any(feature = "test-utils", test))]
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        assert!(
+            bytes.len() == SHORT_FRAME_BYTES || bytes.len() == LONG_FRAME_BYTES,
+            "Frame::from_bytes requires {SHORT_FRAME_BYTES} or {LONG_FRAME_BYTES} bytes, got {}",
+            bytes.len(),
+        );
+        let mut buf = [0u8; MAX_FRAME_BYTES];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        let df = DownlinkFormat::from_first_byte(buf[0]);
+        let crc = if crc::crc24(&buf[..bytes.len()]) == 0 {
+            CrcOutcome::Clean
+        } else {
+            CrcOutcome::Failed
+        };
+        // bytes.len() is asserted to be 7 or 14, both well within u8.
+        let len = bytes.len() as u8;
+        Self { bytes: buf, len, df, crc, confidence: u8::MAX }
+    }
 }
 
 // --- Frame detector ---------------------------------------------------------
