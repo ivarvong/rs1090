@@ -1,6 +1,37 @@
 # rs1090 — A Mode S / ADS-B Decoder in Rust
 
-**Status:** Draft v0.1 · **Owner:** TBD · **License (target):** MIT
+**Status:** Pre-implementation design draft, preserved as-is for the
+record. v0.1.0 has shipped — see [`CHANGELOG.md`](./CHANGELOG.md) for
+what's actually built, and the code itself for the source of truth.
+Where this doc and reality disagree, the code wins.
+
+Known drifts from the original intent worth flagging here:
+
+- **SoapySDR backend** (§6) was deferred; only RTL-SDR (via
+  pure-Rust `nusb`, not the C `librtlsdr` originally planned) and
+  file replay ship in v0.1.
+- **The `Decoder` API sketch** (§11) didn't survive contact with
+  the implementation. Users instead compose `SampleSource` →
+  `FrameDetector` → `message::decode` → `StateTracker` directly.
+  The layered API turned out clearer than a single facade.
+- **Beast** (§1 non-goal) shipped after all — the network outputs
+  in v0.1 include Beast, AVR, and GDL90 in `rs1090-serve`.
+- **Differential testing** (§13.6) is against **pyModeS**, not
+  `dump1090-fa`. On macOS file-input mode, `dump1090-fa` rejected
+  every valid message — pyModeS is the cleaner reference.
+- **Self-hosted Pi Zero W CI runner** (§13.7) doesn't exist. The
+  Pi Zero 2 W has been measured (~14% of one A53 core, ~5 MB RSS);
+  the original Pi Zero W (ARMv6) is still unmeasured.
+- **Replay buffer for SSE reconnect** (§12.4) is deferred — the
+  `Last-Event-ID` header is honoured but no ring buffer is kept.
+- **Squawk in the state tracker** (§10) isn't tracked yet.
+
+The principles, threading model, performance budget, security
+posture, and wire-format conventions are all honoured by the
+implementation. The drifts above are scope/order changes, not
+philosophy changes.
+
+**License:** MIT.
 
 ---
 

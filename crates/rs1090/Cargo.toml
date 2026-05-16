@@ -51,3 +51,12 @@ cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 cast_lossless = "allow"
 cast_precision_loss = "allow"
+
+[[bench]]
+name = "crc"
+harness = false
+
+[[bench]]
+name = "decode"
+harness = false
+required-features = ["test-utils"]

@@ -8,11 +8,13 @@ A Mode S / ADS-B decoder in Rust. Library-first, real-time, runs on
 anything from a Raspberry Pi to a beefy x86_64 server. `unsafe` is
 forbidden workspace-wide.
 
-**Status:** pre-alpha. Pipeline is end-to-end working: library decodes
+**Status:** v0.1.0. Pipeline is end-to-end working: library decodes
 real signals; CLI captures and replays; HTTP/SSE server fans the
-decoded stream out to a live web map. 104 tests passing, clippy clean
-under `-D warnings` pedantic, libFuzzer crash-free across three
-targets, differential-tested against pyModeS, validated on a Pi Zero 2 W.
+decoded stream out to a live web map, plus GDL90 / Beast / AVR for the
+rest of the ADS-B ecosystem. 123 tests passing, clippy clean under
+`-D warnings` pedantic, libFuzzer crash-free across three targets,
+differential-tested against pyModeS with zero field-level
+disagreements, validated on a Pi Zero 2 W with a live RTL-SDR.
 
 The design rationale lives in [DESIGN.md](./DESIGN.md); the runbooks
 below cover every reproducible workflow.
@@ -114,6 +116,8 @@ aviation/SDR tools understand, alongside the HTTP/SSE feed:
 | Topic | Doc |
 |-------|-----|
 | Architecture and design rationale | [`DESIGN.md`](./DESIGN.md) |
+| SDR pipeline (radio → bytes → frames) | [`docs/sdr.md`](docs/sdr.md) |
+| Microbenchmarks + measured Pi numbers | [`docs/benchmarks.md`](docs/benchmarks.md) |
 | Local development workflow | [`docs/development.md`](docs/development.md) |
 | Differential testing against pyModeS | [`docs/differential-testing.md`](docs/differential-testing.md) |
 | Fuzzing with cargo-fuzz | [`docs/fuzzing.md`](docs/fuzzing.md) |

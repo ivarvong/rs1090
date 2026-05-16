@@ -63,7 +63,7 @@ subcommands still build and run unchanged.
 ## Test
 
 ```sh
-cargo test --workspace --release          # ~5 s, 104 tests at last count
+cargo test --workspace --release          # ~5 s, 123 tests at last count
 ```
 
 The `--release` flag matters for the demod/magnitude tests — they
