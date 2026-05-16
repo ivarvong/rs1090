@@ -57,8 +57,11 @@ pub const ACTIVE_ICAO_WINDOW: Duration = Duration::from_secs(60);
 /// Maximum age before an aircraft is dropped on the next eviction pass.
 pub const STALE_AFTER: Duration = Duration::from_secs(300);
 
-/// Per-aircraft running state, exposed for read but not constructed by users.
+/// Per-aircraft running state, exposed for read but not constructed by
+/// users. Marked `#[non_exhaustive]` so adding fields (e.g. altitude,
+/// emergency flags) doesn't require a semver-major bump.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Aircraft {
     pub icao: Icao,
     pub callsign: Option<ArrayString<8>>,
@@ -74,6 +77,7 @@ pub struct Aircraft {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct TimedPosition {
     pub at: Instant,
     pub pos: LatLon,
@@ -82,11 +86,28 @@ pub struct TimedPosition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PositionSource {
     /// Global CPR decode (even+odd pair).
     Global,
     /// Local CPR decode against a prior known position.
     Local,
+}
+
+impl PositionSource {
+    /// Stable wire-format tag, lowercase. Used by the snapshot, the SSE
+    /// stream, and the CLI's human-readable output. The compiler enforces
+    /// exhaustive matching here because the enum is defined in this
+    /// crate, so adding a future variant fires a build error in exactly
+    /// one place.
+    #[inline]
+    #[must_use]
+    pub const fn wire_tag(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Local => "local",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +118,7 @@ struct TimedCpr {
 
 /// Counters for per-aircraft telemetry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Counters {
     pub messages_total: u64,
     pub crc_clean: u64,

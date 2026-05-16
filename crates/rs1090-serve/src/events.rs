@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use rs1090::frame::DownlinkFormat;
 use rs1090::message::{Icao, Velocity, VelocityKind};
-use rs1090::state::{PositionSource, StateEvent};
+use rs1090::state::StateEvent;
 
 /// Wire-format event envelope. Each variant becomes one SSE event with
 /// `event: <tag>` and `data: <json>`.
@@ -70,6 +70,7 @@ impl Event {
 // --- Payload structs --------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct AircraftAcquired {
     pub v: u8,
     pub t: String,
@@ -78,6 +79,7 @@ pub struct AircraftAcquired {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct AircraftIdentification {
     pub v: u8,
     pub t: String,
@@ -87,6 +89,7 @@ pub struct AircraftIdentification {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct AircraftPosition {
     pub v: u8,
     pub t: String,
@@ -98,6 +101,7 @@ pub struct AircraftPosition {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct AircraftVelocity {
     pub v: u8,
     pub t: String,
@@ -127,6 +131,7 @@ pub struct AircraftVelocity {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct AircraftLost {
     pub v: u8,
     pub t: String,
@@ -135,6 +140,7 @@ pub struct AircraftLost {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct AddressRecovered {
     pub v: u8,
     pub t: String,
@@ -179,10 +185,7 @@ pub fn from_state_event(ev: &StateEvent, now_iso: &str) -> Option<Event> {
             icao: *icao,
             lat: pos.lat_deg,
             lon: pos.lon_deg,
-            source: match source {
-                PositionSource::Global => "global",
-                PositionSource::Local => "local",
-            },
+            source: source.wire_tag(),
         }),
         StateEvent::Velocity { icao, velocity } => {
             Event::Velocity(velocity_to_wire(*icao, *velocity, &t()))
@@ -256,6 +259,7 @@ fn downlink_format_raw(df: DownlinkFormat) -> u8 {
 /// JSON-friendly summary of a currently-tracked aircraft. Constructed from
 /// `rs1090::state::Aircraft` at the moment of HTTP request.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct AircraftSnapshot {
     #[serde(serialize_with = "ser_icao")]
     pub icao: Icao,
@@ -271,6 +275,7 @@ pub struct AircraftSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct SnapshotPosition {
     pub lat: f64,
     pub lon: f64,
@@ -280,6 +285,7 @@ pub struct SnapshotPosition {
 
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct SnapshotVelocity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gs_mps: Option<f64>,
@@ -299,7 +305,7 @@ pub struct SnapshotVelocity {
 
 impl SnapshotVelocity {
     pub fn from_velocity(v: Velocity) -> Self {
-        let wire = velocity_to_wire(Icao(0), v, "");
+        let wire = velocity_to_wire(Icao::ZERO, v, "");
         Self {
             gs_mps: wire.gs_mps,
             track_deg: wire.track_deg,
@@ -313,6 +319,7 @@ impl SnapshotVelocity {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
+#[non_exhaustive]
 pub struct SnapshotCounters {
     pub messages_total: u64,
     pub crc_clean: u64,
@@ -407,7 +414,7 @@ mod tests {
             vertical_rate_fpm: None,
             vertical_rate_source: rs1090::message::VerticalRateSource::Baro,
         };
-        let wire = velocity_to_wire(Icao(0), v, "t");
+        let wire = velocity_to_wire(Icao::ZERO, v, "t");
         // 360 kt = 185.2 m/s.
         assert!(
             (wire.gs_mps.unwrap() - 185.2).abs() < 0.1,

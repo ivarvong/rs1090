@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 
 use rs1090::message::Icao;
-use rs1090::state::{Aircraft, PositionSource};
+use rs1090::state::Aircraft;
 
 use crate::events::{
     AircraftSnapshot, EventEnvelope, SnapshotCounters, SnapshotPosition, SnapshotVelocity,
@@ -61,10 +61,7 @@ pub fn snapshot_from(a: &Aircraft) -> AircraftSnapshot {
         position: a.position.map(|p| SnapshotPosition {
             lat: p.pos.lat_deg,
             lon: p.pos.lon_deg,
-            source: match p.source {
-                PositionSource::Global => "global",
-                PositionSource::Local => "local",
-            },
+            source: p.source.wire_tag(),
         }),
         velocity: a.velocity.map(SnapshotVelocity::from_velocity),
         counters: SnapshotCounters {

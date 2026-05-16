@@ -23,7 +23,7 @@ use rs1090::message::{
     self, Altitude, Message, SquitterPayload, Velocity, VelocityKind,
 };
 use rs1090::source::{IqFileSource, SampleSource};
-use rs1090::state::{PositionSource, StateEvent, StateTracker};
+use rs1090::state::{StateEvent, StateTracker};
 use rs1090::Iq;
 
 #[derive(Parser, Debug)]
@@ -388,14 +388,11 @@ fn print_state_event<W: Write>(out: &mut W, event: &StateEvent) -> io::Result<()
             writeln!(out, "ident   {icao} callsign={callsign}")?;
         }
         StateEvent::Position { icao, pos, source } => {
-            let tag = match source {
-                PositionSource::Global => "global",
-                PositionSource::Local => "local ",
-            };
+            // 6-wide column-aligned tag so adjacent lines line up.
             writeln!(
                 out,
-                "pos     {icao} {:.4},{:.4} ({tag})",
-                pos.lat_deg, pos.lon_deg,
+                "pos     {icao} {:.4},{:.4} ({:<6})",
+                pos.lat_deg, pos.lon_deg, source.wire_tag(),
             )?;
         }
         StateEvent::Velocity { icao, velocity } => {

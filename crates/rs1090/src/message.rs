@@ -38,16 +38,64 @@ use crate::frame::{DownlinkFormat, Frame};
 /// The 24-bit ICAO aircraft address.
 ///
 /// On the wire this is a big-endian 3-byte field; we store it as a `u32`
-/// with the low 24 bits significant. The high byte is always zero.
+/// with the low 24 bits significant and the high 8 bits always zero. The
+/// inner field is private so that invariant is enforced by construction;
+/// use [`Icao::from_bytes`], [`Icao::from_u24`], or [`Icao::from_hex`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Icao(pub u32);
+pub struct Icao(u32);
 
 impl Icao {
-    /// Construct from three big-endian bytes.
+    /// The all-zero address. Reserved on the wire — used as a sentinel for
+    /// test fixtures and snapshot scaffolding.
+    pub const ZERO: Self = Self(0);
+
+    /// Construct from three big-endian bytes (the on-the-wire layout).
     #[inline]
     #[must_use]
     pub const fn from_bytes(b: [u8; 3]) -> Self {
         Self(((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32))
+    }
+
+    /// Construct from the low 24 bits of a `u32`. Returns `None` if any
+    /// of the high 8 bits are set.
+    #[inline]
+    #[must_use]
+    pub const fn from_u24(value: u32) -> Option<Self> {
+        if value & 0xFF00_0000 == 0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// Parse from a six-character hex string, case-insensitive.
+    /// Returns `None` if the length is not 6 or any character is non-hex.
+    #[must_use]
+    pub fn from_hex(s: &str) -> Option<Self> {
+        if s.len() != 6 {
+            return None;
+        }
+        let mut v: u32 = 0;
+        for c in s.bytes() {
+            let d = match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                b'A'..=b'F' => c - b'A' + 10,
+                _ => return None,
+            };
+            v = (v << 4) | u32::from(d);
+        }
+        // 6 hex digits ≤ 24 bits, so the from_u24 check is provably
+        // satisfied; the helper still does the right thing if this is
+        // ever generalised.
+        Self::from_u24(v)
+    }
+
+    /// The 24-bit address as a `u32`. The high 8 bits are always zero.
+    #[inline]
+    #[must_use]
+    pub const fn as_u24(self) -> u32 {
+        self.0
     }
 
     /// The three on-the-wire bytes, MSB first.
@@ -76,7 +124,7 @@ impl Icao {
 
 impl core::fmt::Display for Icao {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:06X}", self.0 & 0x00FF_FFFF)
+        f.write_str(self.to_hex().as_str())
     }
 }
 
@@ -544,13 +592,13 @@ mod tests {
     use super::*;
 
     fn icao(bytes: [u8; 3]) -> u32 {
-        Icao::from_bytes(bytes).0
+        Icao::from_bytes(bytes).as_u24()
     }
 
     #[test]
     fn icao_bytes_roundtrip() {
         let i = Icao::from_bytes([0xA1, 0xB2, 0xC3]);
-        assert_eq!(i.0, 0x00A1_B2C3);
+        assert_eq!(i.as_u24(), 0x00A1_B2C3);
         assert_eq!(i.to_bytes(), [0xA1, 0xB2, 0xC3]);
         assert_eq!(icao([0x00, 0x00, 0x01]), 1);
     }
@@ -560,6 +608,25 @@ mod tests {
         let i = Icao::from_bytes([0xa1, 0xb2, 0xc3]);
         assert_eq!(format!("{i}"), "A1B2C3");
         assert_eq!(i.to_hex().as_str(), "A1B2C3");
+    }
+
+    #[test]
+    fn icao_from_u24_rejects_high_bits() {
+        assert_eq!(Icao::from_u24(0x00FF_FFFF).map(Icao::as_u24), Some(0x00FF_FFFF));
+        assert_eq!(Icao::from_u24(0x0100_0000), None);
+        assert_eq!(Icao::from_u24(0xFFFF_FFFF), None);
+    }
+
+    #[test]
+    fn icao_from_hex_accepts_both_cases_and_rejects_garbage() {
+        assert_eq!(Icao::from_hex("A1B2C3"), Some(Icao::from_bytes([0xA1, 0xB2, 0xC3])));
+        assert_eq!(Icao::from_hex("a1b2c3"), Some(Icao::from_bytes([0xA1, 0xB2, 0xC3])));
+        assert_eq!(Icao::from_hex("000001"), Some(Icao::from_bytes([0, 0, 1])));
+        assert_eq!(Icao::from_hex(""), None);
+        assert_eq!(Icao::from_hex("A1B2C"), None); // too short
+        assert_eq!(Icao::from_hex("A1B2C3D"), None); // too long
+        assert_eq!(Icao::from_hex("ZZZZZZ"), None);
+        assert_eq!(Icao::from_hex("A1B2C!"), None);
     }
 
     #[test]

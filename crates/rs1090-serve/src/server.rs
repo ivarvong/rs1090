@@ -64,7 +64,7 @@ async fn get_aircraft(
     State(state): State<AppState>,
     Path(icao_hex): Path<String>,
 ) -> Response {
-    let Some(icao) = parse_icao(&icao_hex) else {
+    let Some(icao) = Icao::from_hex(&icao_hex) else {
         return (axum::http::StatusCode::BAD_REQUEST, "icao must be 6 hex digits").into_response();
     };
     let snap = {
@@ -104,7 +104,7 @@ async fn stream(
 
     let icao_filter: Option<HashSet<Icao>> = params.icao.as_deref().map(|s| {
         s.split(',')
-            .filter_map(|tok| parse_icao(tok.trim()))
+            .filter_map(|tok| Icao::from_hex(tok.trim()))
             .collect()
     });
 
@@ -163,29 +163,3 @@ fn envelope_to_sse(env: EventEnvelope) -> Result<SseEvent, Infallible> {
         .data(data))
 }
 
-fn parse_icao(s: &str) -> Option<Icao> {
-    if s.len() != 6 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let v = u32::from_str_radix(s, 16).ok()?;
-    Some(Icao(v))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_icao_accepts_valid_hex() {
-        assert_eq!(parse_icao("A1B2C3"), Some(Icao(0x00A1_B2C3)));
-        assert_eq!(parse_icao("a1b2c3"), Some(Icao(0x00A1_B2C3)));
-    }
-
-    #[test]
-    fn parse_icao_rejects_invalid() {
-        assert!(parse_icao("").is_none());
-        assert!(parse_icao("A1B2C").is_none()); // too short
-        assert!(parse_icao("A1B2C3D").is_none()); // too long
-        assert!(parse_icao("ZZZZZZ").is_none());
-    }
-}
