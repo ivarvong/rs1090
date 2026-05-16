@@ -142,7 +142,12 @@ fn parse_latlon(s: &str) -> std::result::Result<LatLon, String> {
     Ok(LatLon { lat_deg, lon_deg })
 }
 
+// `main` is the wiring point — CLI parse, sub-system spawn, runtime
+// setup, shutdown handling. Splitting it for the line-count lint would
+// fragment the boot story across helpers and obscure it.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
+    init_tracing();
     let cli = Cli::parse();
     let state = AppState::new();
     let bind = cli.bind.clone();
@@ -168,9 +173,9 @@ fn main() -> Result<()> {
         && !bind.starts_with("localhost")
         && !bind.starts_with("[::1]")
     {
-        eprintln!(
-            "rs1090-serve: WARNING — binding to a non-loopback address ({bind}). \
-             No auth is configured. Front with a reverse proxy for TLS + auth."
+        tracing::warn!(
+            %bind,
+            "binding to a non-loopback address with no auth configured — front with a reverse proxy for TLS + auth",
         );
     }
 
@@ -191,22 +196,29 @@ fn main() -> Result<()> {
         .spawn(move || {
             struct LivenessGuard {
                 flag: Arc<std::sync::atomic::AtomicBool>,
+                died: Arc<tokio::sync::Notify>,
                 armed: bool,
             }
             impl Drop for LivenessGuard {
                 fn drop(&mut self) {
                     if self.armed {
                         self.flag.store(false, std::sync::atomic::Ordering::Release);
+                        // Wake the tokio shutdown task — the server should
+                        // exit too so systemd's `Restart=on-failure` brings
+                        // the whole process back rather than leaving us
+                        // serving a frozen snapshot indefinitely.
+                        self.died.notify_one();
                     }
                 }
             }
             let mut guard = LivenessGuard {
                 flag: decoder_state.decoder_alive.clone(),
+                died: decoder_state.decoder_died.clone(),
                 armed: true,
             };
             match run_decoder(decoder_args, decoder_state.clone()) {
                 Ok(()) => guard.armed = false,
-                Err(e) => eprintln!("rs1090-serve: decoder error: {e:#}"),
+                Err(e) => tracing::error!(error = ?e, "decoder error"),
             }
         })
         .context("spawning decoder thread")?;
@@ -219,21 +231,19 @@ fn main() -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
+    let server_state = state.clone();
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(&bind)
             .await
             .with_context(|| format!("binding {bind}"))?;
-        eprintln!("rs1090-serve: listening on {bind}");
-        eprintln!("    curl http://{bind}/healthz");
-        eprintln!("    curl http://{bind}/aircraft");
-        eprintln!("    curl -N http://{bind}/stream");
+        tracing::info!(%bind, "HTTP server listening");
 
         // Optional BLE peripheral. Runs in its own task; errors are
         // logged and the rest of the server keeps going. Linux + `ble`
         // feature only — on every other build target, the flag is
         // silently accepted and the spawn is a no-op.
         if ble_requested {
-            spawn_ble(state.clone());
+            spawn_ble(server_state.clone());
         }
 
         // Optional GDL90 broadcaster. Spawns a tokio task that pushes
@@ -241,10 +251,10 @@ fn main() -> Result<()> {
         // second to the configured UDP target. Always available
         // (no feature gate; pure UDP, no platform deps).
         if let Some(target) = gdl90_target {
-            let st = state.clone();
+            let st = server_state.clone();
             tokio::spawn(async move {
                 if let Err(e) = gdl90::run(st, target).await {
-                    eprintln!("rs1090-serve: GDL90 broadcaster exited: {e:#}");
+                    tracing::error!(error = ?e, "GDL90 broadcaster exited");
                 }
             });
         }
@@ -253,32 +263,61 @@ fn main() -> Result<()> {
         // the per-frame broadcast inside its own client tasks; multiple
         // consumers per protocol are fine.
         if let Some(bind) = avr_bind {
-            let st = state.clone();
+            let st = server_state.clone();
             tokio::spawn(async move {
                 if let Err(e) = avr::run(st, bind).await {
-                    eprintln!("rs1090-serve: AVR listener exited: {e:#}");
+                    tracing::error!(error = ?e, "AVR listener exited");
                 }
             });
         }
         if let Some(bind) = beast_bind {
-            let st = state.clone();
+            let st = server_state.clone();
             tokio::spawn(async move {
                 if let Err(e) = beast::run(st, bind).await {
-                    eprintln!("rs1090-serve: Beast listener exited: {e:#}");
+                    tracing::error!(error = ?e, "Beast listener exited");
                 }
             });
         }
 
-        axum::serve(listener, server::router(state))
-            .with_graceful_shutdown(shutdown_signal())
+        let shutdown_state = server_state.clone();
+        axum::serve(listener, server::router(server_state))
+            .with_graceful_shutdown(shutdown_signal(shutdown_state))
             .await
             .context("serving")
-    })
+    })?;
+
+    // If the decoder died (not a clean file-replay exit), exit non-zero
+    // so systemd's `Restart=on-failure` (or Kubernetes restartPolicy,
+    // or any other supervisor) brings the process back. Clean exits
+    // (Ctrl-C, file replay finishing) return zero.
+    if !state
+        .decoder_alive
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        tracing::error!("exiting non-zero due to decoder failure");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    eprintln!("rs1090-serve: shutting down");
+async fn shutdown_signal(state: AppState) {
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => tracing::info!("Ctrl-C received, shutting down"),
+        () = state.decoder_died.notified() => {
+            tracing::error!("decoder died, shutting down HTTP server");
+        }
+    }
+}
+
+/// Wire up tracing-subscriber. `RUST_LOG` controls verbosity in the
+/// usual way (`info`, `info,rs1090_serve=debug`, etc.). Default if
+/// unset: `info` for our own crates, `warn` for everything else —
+/// keeps Tokio + Hyper noise out of operator logs.
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,rs1090_serve=info,rs1090=info"));
+    fmt().with_env_filter(filter).with_target(false).init();
 }
 
 /// Linux + `ble` feature: spawn the BLE peripheral task. Any other
@@ -289,16 +328,15 @@ async fn shutdown_signal() {
 fn spawn_ble(state: AppState) {
     tokio::spawn(async move {
         if let Err(e) = ble::run(state).await {
-            eprintln!("rs1090-serve: BLE peripheral exited with error: {e:#}");
+            tracing::error!(error = ?e, "BLE peripheral exited");
         }
     });
 }
 
 #[cfg(not(all(target_os = "linux", feature = "ble")))]
 fn spawn_ble(_state: AppState) {
-    eprintln!(
-        "rs1090-serve: --ble was set but this build has no BLE support \
-         (Linux + `ble` feature required)"
+    tracing::warn!(
+        "--ble was set but this build has no BLE support (Linux + `ble` feature required)",
     );
 }
 
@@ -383,10 +421,11 @@ fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
         });
     }
 
-    eprintln!(
-        "rs1090-serve: decoder exhausted ({frames} frames, {} aircraft, {:.2}s)",
-        tracker.len(),
-        t0.elapsed().as_secs_f64()
+    tracing::info!(
+        frames,
+        aircraft = tracker.len(),
+        elapsed_s = t0.elapsed().as_secs_f64(),
+        "decoder exhausted",
     );
     Ok(())
 }

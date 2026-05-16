@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 use rs1090::frame::Frame;
 use rs1090::message::Icao;
@@ -59,6 +59,12 @@ pub struct AppState {
     /// so a wedged decoder is detectable by load balancers and
     /// monitoring without polling the snapshot for liveness.
     pub decoder_alive: Arc<AtomicBool>,
+    /// Tokio-side counterpart to `decoder_alive`. The decoder thread's
+    /// Drop guard calls `notify_one()` on any abnormal exit; the
+    /// runtime's shutdown signal awaits this alongside Ctrl-C so a
+    /// dead decoder takes the HTTP server down with it instead of
+    /// leaving the process serving a frozen snapshot.
+    pub decoder_died: Arc<Notify>,
 }
 
 impl AppState {
@@ -70,6 +76,7 @@ impl AppState {
             frame_broadcaster: frame_tx,
             snapshot: Arc::new(RwLock::new(HashMap::new())),
             decoder_alive: Arc::new(AtomicBool::new(true)),
+            decoder_died: Arc::new(Notify::new()),
         }
     }
 }

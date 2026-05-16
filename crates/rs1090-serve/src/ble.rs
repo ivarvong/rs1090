@@ -75,7 +75,7 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
     let adapter_name = adapter.name().to_string();
-    eprintln!("rs1090-serve: BLE adapter {adapter_name}, advertising rs1090 service");
+    tracing::info!(adapter = %adapter_name, "BLE peripheral up, advertising rs1090 service");
 
     let latest: Arc<RwLock<Latest>> = Arc::new(RwLock::new(Latest::default()));
 

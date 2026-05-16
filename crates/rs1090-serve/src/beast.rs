@@ -54,7 +54,7 @@ pub const DEFAULT_PORT: u16 = 30_005;
 
 pub async fn run(state: AppState, bind: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind).await?;
-    eprintln!("rs1090-serve: Beast binary TCP listening on {bind}");
+    tracing::info!(%bind, "Beast binary TCP listening");
     let state = Arc::new(state);
     // One shared start time so all sessions agree on the timeline of
     // the 12 MHz counter (matters if a downstream is doing MLAT-style
@@ -65,7 +65,7 @@ pub async fn run(state: AppState, bind: SocketAddr) -> anyhow::Result<()> {
         let rx = state.frame_broadcaster.subscribe();
         tokio::spawn(async move {
             if let Err(e) = handle_client(sock, rx, t0).await {
-                eprintln!("rs1090-serve: Beast client {peer} disconnected: {e}");
+                tracing::debug!(%peer, error = %e, "Beast client disconnected");
             }
         });
     }

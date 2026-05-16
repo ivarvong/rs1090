@@ -41,14 +41,14 @@ pub const DEFAULT_PORT: u16 = 30_002;
 /// per-client backpressure stays per-client.
 pub async fn run(state: AppState, bind: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind).await?;
-    eprintln!("rs1090-serve: AVR-text TCP listening on {bind}");
+    tracing::info!(%bind, "AVR-text TCP listening");
     let state = Arc::new(state);
     loop {
         let (sock, peer) = listener.accept().await?;
         let rx = state.frame_broadcaster.subscribe();
         tokio::spawn(async move {
             if let Err(e) = handle_client(sock, rx).await {
-                eprintln!("rs1090-serve: AVR client {peer} disconnected: {e}");
+                tracing::debug!(%peer, error = %e, "AVR client disconnected");
             }
         });
     }

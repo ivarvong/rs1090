@@ -56,7 +56,7 @@ pub async fn run(state: AppState, target: SocketAddr) -> anyhow::Result<()> {
     let bind: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
     let sock = UdpSocket::bind(bind).await?;
     sock.set_broadcast(true)?;
-    eprintln!("rs1090-serve: GDL90 broadcasting to {target}");
+    tracing::info!(%target, "GDL90 broadcasting");
 
     let sock = Arc::new(sock);
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -71,7 +71,7 @@ async fn send_tick(sock: &UdpSocket, state: &AppState, target: SocketAddr) {
     // Heartbeat first — the EFB rejects a session that never sees one.
     let beat = encode_heartbeat();
     if let Err(e) = sock.send_to(&beat, target).await {
-        eprintln!("rs1090-serve: GDL90 send heartbeat failed: {e}");
+        tracing::warn!(error = %e, "GDL90 send heartbeat failed");
         return;
     }
 
@@ -93,7 +93,7 @@ async fn send_tick(sock: &UdpSocket, state: &AppState, target: SocketAddr) {
             continue;
         };
         if let Err(e) = sock.send_to(&packet, target).await {
-            eprintln!("rs1090-serve: GDL90 send traffic failed: {e}");
+            tracing::warn!(error = %e, "GDL90 send traffic failed");
             return;
         }
     }
