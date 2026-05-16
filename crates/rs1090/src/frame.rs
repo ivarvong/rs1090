@@ -241,6 +241,10 @@ impl Frame {
 /// frame detected (CRC clean or 1-bit corrected) the callback fires once.
 /// Samples may be split across chunks: the detector retains the tail of the
 /// previous chunk so a preamble straddling a boundary is not lost.
+///
+/// The detector owns its magnitude scratch buffer (`mag_buf`) and reuses
+/// it across calls — see [`FrameDetector::new`] for the default sizing
+/// and [`FrameDetector::with_chunk_capacity`] for tuning.
 #[derive(Debug)]
 pub struct FrameDetector {
     floor: NoiseFloor,
@@ -253,11 +257,24 @@ pub struct FrameDetector {
     /// 14 * 8 * 2 = 240 samples. We keep a power-of-two-ish margin.
     carry: [u16; CARRY_SAMPLES],
     carry_len: usize,
+    /// Magnitude buffer reused across every `process` call. Pre-sized in
+    /// the constructor so the steady-state hot path makes zero
+    /// allocations even on memory-constrained targets like the Pi Zero W.
+    /// Grows once if `process` is ever called with a chunk larger than
+    /// the current capacity.
+    mag_buf: alloc::vec::Vec<u16>,
 }
 
 /// Samples we keep across `process` calls. A preamble plus a long frame is
 /// 16 + 224 = 240 samples; round up to 256 for clean indexing.
 const CARRY_SAMPLES: usize = 256;
+
+/// Default magnitude-buffer reserve sized for the chunk shapes the live
+/// SDR pipeline typically delivers: 32 KiB USB transfers at 2 MS/s →
+/// ~16 K `Iq` samples per chunk → ~32 KiB of `u16` after magnitude. We
+/// double that to absorb the carry plus headroom; ~64 KiB of resident
+/// memory per detector, allocated once at construction time.
+const DEFAULT_CHUNK_SAMPLES: usize = 32 * 1024;
 
 /// Bits per long frame.
 const LONG_FRAME_BITS: usize = LONG_FRAME_BYTES * 8;
@@ -281,11 +298,22 @@ impl Default for FrameDetector {
 impl FrameDetector {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_chunk_capacity(DEFAULT_CHUNK_SAMPLES)
+    }
+
+    /// Construct with the magnitude buffer pre-sized for `chunk_samples`
+    /// `Iq` samples per call. If `process` is later called with larger
+    /// chunks, the buffer grows once (a single allocation, then stable).
+    /// Callers that know their exact chunk size should pass it here for
+    /// strict "no allocations after construction" behaviour.
+    #[must_use]
+    pub fn with_chunk_capacity(chunk_samples: usize) -> Self {
         Self {
             floor: NoiseFloor::fresh(),
             min_confidence: 0,
             carry: [0; CARRY_SAMPLES],
             carry_len: 0,
+            mag_buf: alloc::vec::Vec::with_capacity(chunk_samples + CARRY_SAMPLES),
         }
     }
 
@@ -305,25 +333,27 @@ impl FrameDetector {
     /// `samples` may be of any length; internally the detector concatenates
     /// it with the carry-over from the previous call. Allocates nothing.
     pub fn process<F: FnMut(&Frame)>(&mut self, samples: &[Iq], mut on_frame: F) {
-        // 1. Build a contiguous magnitude buffer from carry + new samples.
-        //    For now we use a heap Vec; the streaming version uses a fixed
-        //    ring. The DESIGN.md hot-path budget allows pre-allocated buffers
-        //    sized once at startup, which the higher-level Decoder will own;
-        //    here we keep the API simple and revisit when the streaming
-        //    pipeline lands.
+        // 1. Build a contiguous magnitude buffer from carry + new samples
+        //    in the detector-owned scratch. `clear` does not deallocate;
+        //    the `Vec` retains its capacity across calls so the steady-
+        //    state hot path is zero-alloc. The single growth that may
+        //    happen on a first oversized chunk is the only allocation
+        //    after construction.
         //
-        //    This is the one allocation in the frame layer; it's outside
-        //    the per-sample hot path (one alloc per `process` call) and
-        //    will be lifted to a caller-supplied scratch in a later pass.
-        let mut buf: alloc::vec::Vec<u16> =
-            alloc::vec::Vec::with_capacity(self.carry_len + samples.len());
-        buf.extend_from_slice(&self.carry[..self.carry_len]);
-        for &s in samples {
-            // We use alpha-max-beta-min here unconditionally; the LUT vs
-            // AMBM choice is left to a higher-level pipeline that knows
-            // its target arch.
-            buf.push(magnitude::alpha_max_beta_min(s));
+        //    We use alpha-max-beta-min unconditionally for magnitude;
+        //    the LUT vs AMBM choice is left to a higher-level pipeline
+        //    that knows its target arch.
+        self.mag_buf.clear();
+        let total = self.carry_len + samples.len();
+        if total > self.mag_buf.capacity() {
+            self.mag_buf.reserve(total - self.mag_buf.capacity());
         }
+        self.mag_buf
+            .extend_from_slice(&self.carry[..self.carry_len]);
+        for &s in samples {
+            self.mag_buf.push(magnitude::alpha_max_beta_min(s));
+        }
+        let buf = &self.mag_buf;
 
         // 2. Walk the buffer looking for preambles. Update the floor at
         //    every sample so it tracks across both signal and noise.
@@ -697,5 +727,31 @@ mod tests {
         let mut got = 0usize;
         det.process(&samples, |_| got += 1);
         assert_eq!(got, 0, "below-threshold frame should be filtered");
+    }
+
+    #[test]
+    fn process_is_zero_allocation_in_steady_state() {
+        // The detector pre-sizes its magnitude buffer in the constructor;
+        // subsequent `process` calls at or below that chunk size must not
+        // grow it. This is the load-bearing test for the Pi Zero W
+        // claim — a per-call `Vec::with_capacity` would re-allocate
+        // on every SDR chunk.
+        let chunk = 1024;
+        let mut det = FrameDetector::with_chunk_capacity(chunk);
+        let initial_cap = det.mag_buf.capacity();
+        assert!(
+            initial_cap >= chunk + CARRY_SAMPLES,
+            "constructor should pre-allocate (got {initial_cap}, want >= {})",
+            chunk + CARRY_SAMPLES,
+        );
+        let samples = vec![Iq::new(0, 0); chunk];
+        for _ in 0..32 {
+            det.process(&samples, |_| {});
+        }
+        assert_eq!(
+            det.mag_buf.capacity(),
+            initial_cap,
+            "process must not grow the magnitude buffer at or below the configured chunk size",
+        );
     }
 }
