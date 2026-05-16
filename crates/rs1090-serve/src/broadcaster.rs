@@ -26,6 +26,7 @@ use std::sync::{Arc, RwLock};
 
 use tokio::sync::broadcast;
 
+use rs1090::frame::Frame;
 use rs1090::message::Icao;
 use rs1090::state::Aircraft;
 
@@ -42,6 +43,14 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 #[derive(Clone)]
 pub struct AppState {
     pub broadcaster: broadcast::Sender<EventEnvelope>,
+    /// Per-frame fan-out — every CRC-clean or 1-bit-corrected frame
+    /// the detector emits is pushed here. Consumers that need raw
+    /// frame bytes (AVR-text TCP, Beast TCP, dump1090-compatible
+    /// feeders) subscribe to this rather than reconstructing bytes
+    /// from the decoded `EventEnvelope` stream — the envelope is
+    /// post-decode, the frame is pre-decode, and they're disjoint
+    /// information once you cross that boundary.
+    pub frame_broadcaster: broadcast::Sender<Frame>,
     pub snapshot: Arc<RwLock<HashMap<Icao, AircraftSnapshot>>>,
     /// Set to `true` while the decoder thread is running. The thread
     /// flips this to `false` on any exit path — clean return, error
@@ -55,8 +64,10 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(DEFAULT_BROADCAST_CAPACITY);
+        let (frame_tx, _frame_rx) = broadcast::channel(DEFAULT_BROADCAST_CAPACITY);
         Self {
             broadcaster: tx,
+            frame_broadcaster: frame_tx,
             snapshot: Arc::new(RwLock::new(HashMap::new())),
             decoder_alive: Arc::new(AtomicBool::new(true)),
         }

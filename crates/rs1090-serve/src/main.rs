@@ -5,6 +5,8 @@
 //! a `tokio::sync::broadcast` channel, and never awaits anything. The tokio
 //! runtime hosts axum and the SSE connections.
 
+mod avr;
+mod beast;
 mod broadcaster;
 mod events;
 mod gdl90;
@@ -65,6 +67,16 @@ struct Cli {
     /// Override the GDL90 UDP destination. Implies `--gdl90`.
     #[arg(long, value_parser = clap::value_parser!(std::net::SocketAddr))]
     gdl90_target: Option<std::net::SocketAddr>,
+
+    /// Serve AVR-text (dump1090 `--raw` shape) over TCP. Optional
+    /// `[BIND_ADDR]:PORT`; defaults to `0.0.0.0:30002`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "0.0.0.0:30002", value_parser = clap::value_parser!(std::net::SocketAddr))]
+    avr: Option<std::net::SocketAddr>,
+
+    /// Serve Beast binary (dump1090-fa `--net-bo-port`) over TCP.
+    /// Optional `[BIND_ADDR]:PORT`; defaults to `0.0.0.0:30005`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "0.0.0.0:30005", value_parser = clap::value_parser!(std::net::SocketAddr))]
+    beast: Option<std::net::SocketAddr>,
 
     #[command(subcommand)]
     source: Source,
@@ -127,6 +139,8 @@ fn main() -> Result<()> {
         (true, None) => Some(gdl90::DEFAULT_TARGET),
         (false, None) => None,
     };
+    let avr_bind = cli.avr;
+    let beast_bind = cli.beast;
 
     // Warn loudly when bound publicly per DESIGN.md §12.8.
     if !bind.starts_with("127.0.0.1")
@@ -214,6 +228,26 @@ fn main() -> Result<()> {
             });
         }
 
+        // Optional AVR-text / Beast TCP listeners. Each subscribes to
+        // the per-frame broadcast inside its own client tasks; multiple
+        // consumers per protocol are fine.
+        if let Some(bind) = avr_bind {
+            let st = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = avr::run(st, bind).await {
+                    eprintln!("rs1090-serve: AVR listener exited: {e:#}");
+                }
+            });
+        }
+        if let Some(bind) = beast_bind {
+            let st = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = beast::run(st, bind).await {
+                    eprintln!("rs1090-serve: Beast listener exited: {e:#}");
+                }
+            });
+        }
+
         axum::serve(listener, server::router(state))
             .with_graceful_shutdown(shutdown_signal())
             .await
@@ -297,11 +331,17 @@ fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
             t0 + Duration::from_nanos(samples_consumed * 1_000_000_000 / u64::from(sample_rate));
 
         let tx = state.broadcaster.clone();
+        let frame_tx = state.frame_broadcaster.clone();
         let snapshot = state.snapshot.clone();
         let next_id = next_id.clone();
 
         detector.process(&iq_buf[..n], |frame| {
             frames += 1;
+            // Fan the raw Frame out to AVR / Beast / etc. before any
+            // decode pass. Errors only fire when no consumer is
+            // subscribed; drop silently. `Frame: Copy`, so this is
+            // free.
+            let _ = frame_tx.send(*frame);
             tracker.ingest(frame, virtual_now, &mut events_buf);
             for ev in events_buf.drain(..) {
                 // Refresh the shared snapshot keyed on the affected ICAO.
