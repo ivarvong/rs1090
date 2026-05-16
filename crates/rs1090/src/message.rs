@@ -405,6 +405,76 @@ fn decode_extended_squitter(bytes: &[u8]) -> ExtendedSquitter {
     }
 }
 
+// --- Bit reader -------------------------------------------------------------
+
+/// MSB-first reader over a byte slice using 1-indexed bit positions.
+///
+/// Mode S / ADS-B field layouts are documented in DO-260B / ICAO Annex 10
+/// using 1-indexed positions counted from the MSB of byte 0. Manual
+/// `(bits >> (N - position)) & mask` shifts get ahead of the reader fast
+/// — a 56-bit ME field with a dozen fields is hard to audit against the
+/// spec. This helper lets the call sites match the spec literally:
+///
+/// ```ignore
+/// let r = BitReader::new(&me);
+/// let subtype = r.bits(6, 3);   // ME bits 6..=8
+/// let lat_cpr = r.bits(23, 17); // ME bits 23..=39
+/// ```
+struct BitReader<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> BitReader<'a> {
+    #[inline]
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+
+    /// Read `len` bits starting at 1-indexed position `pos`, MSB-first.
+    /// The result is right-aligned in the returned `u32`.
+    ///
+    /// # Panics
+    /// Panics in debug builds if the request is out of range or larger
+    /// than 32 bits. The decoder calls only ever request fields that
+    /// fit the spec; corrupt inputs are filtered at the frame layer.
+    #[inline]
+    fn bits(&self, pos: usize, len: u8) -> u32 {
+        debug_assert!(pos >= 1, "BitReader uses 1-indexed positions");
+        debug_assert!(len > 0 && len <= 32);
+        debug_assert!(pos - 1 + len as usize <= self.bytes.len() * 8);
+
+        let start = pos - 1; // 0-indexed from MSB of byte 0
+        let end = start + len as usize; // exclusive
+        let first_byte = start / 8;
+        let last_byte = (end - 1) / 8;
+
+        // Load up to 5 bytes (40 bits) into a u64 accumulator, then
+        // shift to right-align. 5 bytes covers any 32-bit field across
+        // any byte alignment.
+        let mut acc: u64 = 0;
+        for &b in &self.bytes[first_byte..=last_byte] {
+            acc = (acc << 8) | u64::from(b);
+        }
+        let trailing = (last_byte + 1) * 8 - end;
+        let mask = if len == 32 {
+            u64::from(u32::MAX)
+        } else {
+            (1u64 << len) - 1
+        };
+        ((acc >> trailing) & mask) as u32
+    }
+
+    /// Read a single bit at 1-indexed position `pos`.
+    #[inline]
+    fn bit(&self, pos: usize) -> bool {
+        debug_assert!(pos >= 1);
+        debug_assert!(pos <= self.bytes.len() * 8);
+        let byte = (pos - 1) / 8;
+        let bit = 7 - ((pos - 1) % 8);
+        (self.bytes[byte] >> bit) & 1 != 0
+    }
+}
+
 // --- Identification ---------------------------------------------------------
 
 /// Map a 6-bit character code (per ICAO Annex 10 Vol IV §3.1.2.9) to a
@@ -455,31 +525,26 @@ fn decode_identification(me: [u8; 7]) -> Identification {
 // --- Airborne position ------------------------------------------------------
 
 fn decode_airborne_position(me: [u8; 7]) -> AirbornePosition {
-    let tc = me[0] >> 3;
-    // ME bit layout (1-indexed from the spec, 0-indexed here):
-    //   bits 0..=4  : TC
-    //   bits 5..=6  : surveillance status
-    //   bit  7      : NIC supplement B (TC 9-18) or single-antenna flag
-    //   bits 8..=19 : altitude (12 bits, with Q-bit at position 8 → bit 4
-    //                 within the AC12 field)
-    //   bit  20     : T flag
-    //   bit  21     : F flag (CPR even/odd)
-    //   bits 22..=38: lat_cpr (17 bits)
-    //   bits 39..=55: lon_cpr (17 bits)
-    //
-    // We compute these by treating the ME as a big-endian 56-bit field.
-    let me_bits: u64 = u64::from_be_bytes([
-        0, me[0], me[1], me[2], me[3], me[4], me[5], me[6],
-    ]);
+    // ME bit layout per DO-260B (1-indexed MSB-first):
+    //   bits  1..=5  : TC
+    //   bits  6..=7  : surveillance status
+    //   bit   8      : NIC supplement B (TC 9-18) or single-antenna flag
+    //   bits  9..=20 : AC12 altitude (Q-bit at position 13)
+    //   bit  21      : T flag
+    //   bit  22      : F flag (CPR even/odd)
+    //   bits 23..=39 : lat_cpr (17 bits)
+    //   bits 40..=56 : lon_cpr (17 bits)
+    let r = BitReader::new(&me);
+    #[allow(clippy::cast_possible_truncation)]
+    let tc = r.bits(1, 5) as u8;
+    #[allow(clippy::cast_possible_truncation)]
+    let ac12 = r.bits(9, 12) as u16;
+    let f_flag = r.bit(22);
+    let lat_cpr = r.bits(23, 17);
+    let lon_cpr = r.bits(40, 17);
 
-    let ac12 = ((me_bits >> (56 - 20)) & 0xFFF) as u16; // bits 8..=19
-    let f_flag = ((me_bits >> (56 - 22)) & 0x1) != 0; // bit 21
-    let lat_cpr = ((me_bits >> (56 - 39)) & 0x1_FFFF) as u32; // bits 22..=38
-    let lon_cpr = (me_bits & 0x1_FFFF) as u32; // bits 39..=55
-
-    let altitude = decode_altitude_ac12(ac12, tc);
     AirbornePosition {
-        altitude,
+        altitude: decode_altitude_ac12(ac12, tc),
         cpr: CprPosition {
             lat_cpr,
             lon_cpr,
@@ -523,41 +588,60 @@ fn decode_altitude_ac12(ac12: u16, tc: u8) -> Altitude {
 // --- Velocity ---------------------------------------------------------------
 
 fn decode_velocity(me: [u8; 7]) -> Result<Velocity, DecodeError> {
-    let subtype = me[0] & 0x07;
-
-    // Common fields: vertical rate sign + magnitude at bits 36..=44 (9 bits)
-    // of the ME, source bit at bit 35.
-    let me_bits: u64 = u64::from_be_bytes([
-        0, me[0], me[1], me[2], me[3], me[4], me[5], me[6],
-    ]);
-    let vr_source = if ((me_bits >> (56 - 36)) & 1) == 0 {
-        VerticalRateSource::Baro
-    } else {
+    // ME bit layout for TC=19 (velocity), 1-indexed MSB-first:
+    //   bits  1..=5  : TC (19)
+    //   bits  6..=8  : subtype (1=GS subsonic, 2=GS supersonic,
+    //                            3=AS subsonic, 4=AS supersonic)
+    //   bit   9      : intent change flag
+    //   bit  10      : IFR capability
+    //   bits 11..=13 : NACv
+    //
+    //   Subtype 1/2 (ground velocity):
+    //     bit  14     : EW direction (0=east, 1=west)
+    //     bits 15..=24: EW velocity (raw-1; 0 = unavailable)
+    //     bit  25     : NS direction (0=north, 1=south)
+    //     bits 26..=35: NS velocity
+    //
+    //   Subtype 3/4 (airspeed):
+    //     bit  14     : heading status (1=heading valid)
+    //     bits 15..=24: heading (× 360/1024 = deg)
+    //     bit  25     : airspeed type (0=IAS, 1=TAS)
+    //     bits 26..=35: airspeed (raw-1)
+    //
+    //   Common to all subtypes:
+    //     bit  36     : VR source (0=baro, 1=GNSS)
+    //     bit  37     : VR sign (1 = descending)
+    //     bits 38..=46: VR magnitude (raw-1, × 64 = ft/min)
+    let r = BitReader::new(&me);
+    #[allow(clippy::cast_possible_truncation)]
+    let subtype = r.bits(6, 3) as u8;
+    let vr_source = if r.bit(36) {
         VerticalRateSource::Gnss
+    } else {
+        VerticalRateSource::Baro
     };
-    let vr_sign = ((me_bits >> (56 - 37)) & 1) != 0; // 1 = down
-    let vr_mag = ((me_bits >> (56 - 46)) & 0x1FF) as i32; // 9 bits
+    let vr_sign = r.bit(37);
+    #[allow(clippy::cast_possible_wrap)]
+    let vr_mag = r.bits(38, 9) as i32;
     let vertical_rate_fpm = if vr_mag == 0 {
         None
     } else {
-        // (mag - 1) * 64 ft/min, sign per vr_sign.
         let v = (vr_mag - 1) * 64;
         Some(if vr_sign { -v } else { v })
     };
 
     let kind = match subtype {
         1 | 2 => {
-            // Ground speed.
-            // East/West velocity: sign bit + 10 bits magnitude, bits 14..=24
-            let ew_sign = ((me_bits >> (56 - 14)) & 1) != 0; // 1 = west
-            let ew_v = ((me_bits >> (56 - 24)) & 0x3FF) as i32; // 10 bits
-            // North/South velocity: sign + 10 bits, bits 25..=35
-            let ns_sign = ((me_bits >> (56 - 25)) & 1) != 0; // 1 = south
-            let ns_v = ((me_bits >> (56 - 35)) & 0x3FF) as i32;
+            let ew_sign = r.bit(14); // 1 = west
+            #[allow(clippy::cast_possible_wrap)]
+            let ew_v = r.bits(15, 10) as i32;
+            let ns_sign = r.bit(25); // 1 = south
+            #[allow(clippy::cast_possible_wrap)]
+            let ns_v = r.bits(26, 10) as i32;
 
-            // Both fields encode magnitude as (raw - 1); 0 means
-            // "not available". For simplicity if either is zero we still
-            // produce a result with whatever we have.
+            // Both fields encode magnitude as `raw - 1`; 0 means
+            // "not available". A missing component still produces a
+            // velocity at the other axis, rather than failing decode.
             let ew = if ew_v == 0 { 0 } else { ew_v - 1 };
             let ns = if ns_v == 0 { 0 } else { ns_v - 1 };
             let ew = if ew_sign { -ew } else { ew };
@@ -565,13 +649,13 @@ fn decode_velocity(me: [u8; 7]) -> Result<Velocity, DecodeError> {
 
             // Supersonic subtypes (2) scale by 4.
             let scale = if subtype == 2 { 4.0 } else { 1.0 };
-            let ew_f = ew as f64 * scale;
-            let ns_f = ns as f64 * scale;
-            // Truncate (don't round). Matches pyModeS — the de-facto Python
-            // reference — and the typical C convention of `(int)sqrt(...)`.
-            // DO-260B doesn't specify, and the difference is ≤1 kt.
+            let ew_f = f64::from(ew) * scale;
+            let ns_f = f64::from(ns) * scale;
+            // Truncate (don't round) to match pyModeS and the typical
+            // `(int)sqrt(...)` idiom in C reference decoders. DO-260B
+            // doesn't specify; the difference is bounded by 1 kt.
             let speed = ew_f.hypot(ns_f).trunc() as u16;
-            // Heading is degrees clockwise from north. atan2(east, north).
+            // Heading is degrees clockwise from north: atan2(east, north).
             let heading = ew_f.atan2(ns_f).to_degrees();
             let heading = if heading < 0.0 { heading + 360.0 } else { heading };
             VelocityKind::Ground {
@@ -580,11 +664,10 @@ fn decode_velocity(me: [u8; 7]) -> Result<Velocity, DecodeError> {
             }
         }
         3 | 4 => {
-            // Airspeed.
-            let heading_valid = ((me_bits >> (56 - 14)) & 1) != 0;
-            let heading_raw = ((me_bits >> (56 - 24)) & 0x3FF) as u32; // 10 bits
-            let airspeed_type_mach = ((me_bits >> (56 - 25)) & 1) != 0;
-            let airspeed_raw = ((me_bits >> (56 - 35)) & 0x3FF) as u32;
+            let heading_valid = r.bit(14);
+            let heading_raw = r.bits(15, 10);
+            let airspeed_type_mach = r.bit(25);
+            let airspeed_raw = r.bits(26, 10);
             let speed = if airspeed_raw == 0 {
                 0
             } else if subtype == 4 {
@@ -893,6 +976,32 @@ mod tests {
     // the dispatcher with a hand-crafted Frame built through the public
     // synthesis path used in CLI integration tests, to keep this module's
     // surface area small.
+
+    #[test]
+    fn bit_reader_reads_known_fields_msb_first() {
+        // Bytes 0x8D, 0x40, 0x62, 0x10 in MSB-first bit positions:
+        //   1  2  3  4  5  6  7  8  | 9 10 11 12 13 14 15 16 ...
+        //   1  0  0  0  1  1  0  1  | 0  1  0  0  0  0  0  0 ...
+        let r = BitReader::new(&[0x8D, 0x40, 0x62, 0x10]);
+        assert_eq!(r.bits(1, 5), 0b10001); // 0x11 = 17
+        assert_eq!(r.bits(6, 3), 0b101); // 5
+        assert!(r.bit(1));
+        assert!(!r.bit(2));
+        assert!(r.bit(8));
+        assert!(!r.bit(9));
+        // Cross a byte boundary: bits 6..=13 should give the low 3 of
+        // byte 0 concatenated with the high 5 of byte 1: 0b101 01000
+        assert_eq!(r.bits(6, 8), 0b1010_1000);
+        // Wide field: bits 9..=32 (24 bits) should be 0x40_6210.
+        assert_eq!(r.bits(9, 24), 0x0040_6210);
+    }
+
+    #[test]
+    fn bit_reader_handles_32_bit_fields() {
+        let r = BitReader::new(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00]);
+        assert_eq!(r.bits(1, 32), 0xDEAD_BEEF);
+        assert_eq!(r.bits(9, 32), 0xADBE_EF00);
+    }
 
     #[test]
     fn ground_velocity_truncates_speed_fraction() {
