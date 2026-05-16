@@ -2,10 +2,18 @@
 //!
 //! Two pieces:
 //!
-//! - `snapshot: ArcSwap<AircraftMap>` (here implemented as
-//!   `Arc<RwLock<...>>` to avoid pulling in `arc-swap`) for `/aircraft`
-//!   reads. Updates happen on the decoder thread; reads are lock-free
-//!   in the common case (single Arc clone).
+//! - `snapshot: Arc<RwLock<HashMap<Icao, AircraftSnapshot>>>` for
+//!   `/aircraft` reads. **`RwLock` is the right primitive here — not
+//!   `arc-swap`.** The decoder thread updates the snapshot on every
+//!   state event (10-100 Hz of writes); HTTP reads on `/aircraft` are
+//!   sporadic (a polling browser, every few seconds). With this
+//!   write-heavy, read-light pattern, an `ArcSwap<HashMap>` would force
+//!   the writer to rebuild and atomically swap the whole map on every
+//!   event — orders of magnitude more allocation than the per-event
+//!   `HashMap::insert` we do under `RwLock`. `dashmap` was considered
+//!   for fine-grained locking but with a single writer thread there's
+//!   no contention to fix; an `RwLock` with one writer and one or two
+//!   readers spends ~zero time blocked at this rate.
 //! - `tokio::sync::broadcast` channel that fans events out to every
 //!   connected SSE client. Slow clients lag rather than block the decode
 //!   thread — `broadcast::Sender::send` returns immediately even if
