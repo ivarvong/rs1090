@@ -89,6 +89,22 @@ curl -sN 'http://<host>:8080/stream?icao=A0BA4E'
 curl -sN 'http://<host>:8080/stream?alt_min=30000'
 ```
 
+## Talking to the rest of the ecosystem
+
+`rs1090-serve` can broadcast its decoded traffic in formats other
+aviation/SDR tools understand, alongside the HTTP/SSE feed:
+
+- **GDL90 over UDP** — `--gdl90` broadcasts to `255.255.255.255:4000`,
+  or `--gdl90-target IP:PORT` unicasts. iPad / iPhone EFB apps
+  (ForeFlight, Garmin Pilot, FlyQ) auto-discover and render the
+  traffic on their moving map. No custom mobile code required —
+  the EFB *is* the UI.
+- **BLE GATT peripheral** — `--ble` (Linux + `ble` feature) advertises
+  rs1090 as a Bluetooth peripheral with a custom service exposing
+  aircraft count, nearest-aircraft summary, and a UTF-8 one-liner.
+  iPhone running nRF Connect connects and subscribes, no app needed.
+  See [`docs/raspberry-pi.md`](docs/raspberry-pi.md#ble-peripheral-optional).
+
 ## Documentation
 
 | Topic | Doc |
