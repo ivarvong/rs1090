@@ -95,21 +95,25 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     };
     let _adv_handle = adapter.advertise(advertisement).await?;
 
-    // Spawn a supervisor that refreshes `latest` on every broadcaster
-    // event, capped at one rewrite per ~250 ms so a busy receiver
-    // doesn't spam notifications faster than a BLE link can absorb.
+    // Supervisor: refresh `latest` on every broadcaster event, capped
+    // at one rewrite per ~250 ms so a busy receiver doesn't spam
+    // notifications faster than a BLE link can absorb. `Option<Instant>`
+    // (instead of an initial-value `Instant::now() - 250ms`) keeps the
+    // first event from being silently rate-limited and sidesteps any
+    // theoretical underflow on a freshly-booted monotonic clock.
     let mut rx = state.broadcaster.subscribe();
-    let mut last_push = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let mut last_push: Option<std::time::Instant> = None;
     loop {
-        // Drain whatever's pending; we only care about the trigger.
         match rx.recv().await {
             Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
-        if last_push.elapsed() < std::time::Duration::from_millis(250) {
-            continue;
+        if let Some(t) = last_push {
+            if t.elapsed() < std::time::Duration::from_millis(250) {
+                continue;
+            }
         }
-        last_push = std::time::Instant::now();
+        last_push = Some(std::time::Instant::now());
         let snapshot = {
             let map = state.snapshot.read().expect("snapshot lock poisoned");
             map.values().cloned().collect::<Vec<_>>()
