@@ -7,6 +7,7 @@
 
 mod broadcaster;
 mod events;
+mod gdl90;
 mod server;
 
 #[cfg(all(target_os = "linux", feature = "ble"))]
@@ -52,6 +53,18 @@ struct Cli {
     /// rejected on other targets to keep cross-platform builds clean.
     #[arg(long)]
     ble: bool,
+
+    /// Broadcast GDL90 traffic reports over UDP for EFB apps
+    /// (`ForeFlight`, Garmin Pilot, `FlyQ`). Pass `--gdl90` for the
+    /// LAN-broadcast default of `255.255.255.255:4000`, or
+    /// `--gdl90-target IP:PORT` for unicast (e.g. an iPad over
+    /// Tailscale).
+    #[arg(long)]
+    gdl90: bool,
+
+    /// Override the GDL90 UDP destination. Implies `--gdl90`.
+    #[arg(long, value_parser = clap::value_parser!(std::net::SocketAddr))]
+    gdl90_target: Option<std::net::SocketAddr>,
 
     #[command(subcommand)]
     source: Source,
@@ -109,6 +122,11 @@ fn main() -> Result<()> {
     let state = AppState::new();
     let bind = cli.bind.clone();
     let ble_requested = cli.ble;
+    let gdl90_target = match (cli.gdl90, cli.gdl90_target) {
+        (_, Some(addr)) => Some(addr),
+        (true, None) => Some(gdl90::DEFAULT_TARGET),
+        (false, None) => None,
+    };
 
     // Warn loudly when bound publicly per DESIGN.md §12.8.
     if !bind.starts_with("127.0.0.1")
@@ -181,6 +199,19 @@ fn main() -> Result<()> {
         // silently accepted and the spawn is a no-op.
         if ble_requested {
             spawn_ble(state.clone());
+        }
+
+        // Optional GDL90 broadcaster. Spawns a tokio task that pushes
+        // a heartbeat + one traffic report per known aircraft every
+        // second to the configured UDP target. Always available
+        // (no feature gate; pure UDP, no platform deps).
+        if let Some(target) = gdl90_target {
+            let st = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = gdl90::run(st, target).await {
+                    eprintln!("rs1090-serve: GDL90 broadcaster exited: {e:#}");
+                }
+            });
         }
 
         axum::serve(listener, server::router(state))
