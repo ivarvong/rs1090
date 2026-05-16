@@ -64,8 +64,8 @@ pub fn crc24(bytes: &[u8]) -> u32 {
 
 /// Bit-at-a-time reference implementation. Identical output to [`crc24`].
 ///
-/// Used in tests to verify [`TABLE`] is correct and available as a fallback
-/// where the 1 KiB table cost is unacceptable.
+/// Used in tests to verify the byte-at-a-time lookup table is correct,
+/// and available as a fallback where the 1 KiB table cost is unacceptable.
 #[must_use]
 pub fn crc24_bitwise(bytes: &[u8]) -> u32 {
     let mut rem: u32 = 0;

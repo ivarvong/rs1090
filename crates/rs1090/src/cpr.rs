@@ -95,8 +95,8 @@ pub enum CprError {
 /// `NL(lat) = floor(2π / acos(1 - (1 - cos(π / (2·NZ))) / cos²(|lat|·π/180)))`,
 /// clamped to `[1, 59]`. Returns `1` at the poles and `59` at the equator.
 ///
-/// At runtime callers should use [`NL_TABLE`]; this is exposed for the test
-/// that cross-checks the table against the formula.
+/// At runtime callers should use the pinned `NL_TABLE`; this function is
+/// exposed for the test that cross-checks the table against the formula.
 #[inline]
 #[must_use]
 pub fn nl_formula(lat_deg: f64) -> u32 {

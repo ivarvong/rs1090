@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "rs1090"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "rs1090-cli"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "rs1090-serve"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",

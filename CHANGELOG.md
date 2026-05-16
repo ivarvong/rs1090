@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-05-16
+
+First tagged release. The full pipeline — `Iq` samples → demod → CRC →
+message decode → state tracker — works end-to-end on real captures and
+on a live RTL-SDR. HTTP/SSE serving, a live web map, GDL90 / AVR /
+Beast ecosystem outputs, and an unvalidated-on-hardware BLE GATT
+peripheral all ship in `rs1090-serve`. 123 tests passing across the
+workspace; clippy clean under `-D warnings` pedantic; libFuzzer
+crash-free across three targets at tens of millions of executions;
+the pyModeS differential harness reports zero field-level
+disagreements on the 2-minute corpus.
+
+**Known scope/quality calls explicitly made for v0.1.0**:
+
+- The BLE peripheral code ships and unit-tests pass, but live
+  hardware verification (nRF Connect on iPhone seeing the
+  advertisement) is deferred — the on-Pi `--features ble` build was
+  in flight when v0.1.0 was tagged. Code is dormant unless the user
+  enables both the `ble` feature and `--ble` at runtime.
+- ForeFlight GDL90 reception requires a Pro Plus subscription; we
+  emit the ForeFlight ID extension correctly, but free/Basic tiers
+  don't bind UDP 4000 and so won't show traffic regardless.
+- The Pi Zero W (original ARMv6) target named in DESIGN.md is still
+  unvalidated; only the Pi Zero 2 W (aarch64) has been measured
+  end-to-end.
+- The `live` subcommand requires a real RTL-SDR; there is no mock
+  backend for CI-free hardware-less testing of the SDR path.
+
 ### Added
 
 - Initial workspace scaffold: `rs1090` (library) and `rs1090-cli` (binary) crates.

@@ -1,9 +1,20 @@
-# Continuous integration: every push and pull request runs the same
-# checks the local hooks enforce — `cargo test`, `cargo clippy`, and
-# `cargo fmt`. The MSRV is pinned in `rust-version = "1.85"` at the
-# workspace level; we install that toolchain explicitly so a drift in
-# the locked dependencies that requires a newer compiler is caught
-# here rather than at a user's checkout.
+# Continuous integration. Every push and pull request runs the same
+# checks the pre-push hooks enforce locally:
+#
+#   - test (stable + MSRV)        — `cargo test --workspace`
+#   - clippy                      — `-D warnings`, pedantic
+#   - fmt                         — `cargo fmt --check`
+#   - aarch64 cross-build smoke   — the Pi deployment path stays
+#                                   buildable, even though we can't
+#                                   exercise a real SDR in CI.
+#   - docs                        — `cargo doc` warnings rejected so
+#                                   rustdoc rot is caught at PR time.
+#
+# The MSRV is pinned in `rust-version = "1.85"` at the workspace
+# level. The MSRV row catches accidental use of newer compiler
+# features in dependency updates — if it fails, either bump
+# `rust-version` (with a CHANGELOG note explaining why) or pin the
+# offending dep to a compatible version.
 
 name: ci
 
@@ -12,9 +23,16 @@ on:
     branches: [main]
   pull_request:
 
+# `-D warnings` rejects every compiler warning project-wide. We rely
+# on this as a hard backstop in addition to clippy's `-D warnings`,
+# because some lints are rustc-only and only fire under it.
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Faster builds, no IO contention worth caring about in CI.
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
 
 jobs:
   test:
@@ -23,11 +41,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `stable` proves we keep pace with the current compiler.
-        # The MSRV row catches accidental use of features added in a
-        # newer release — if this fails the fix is to either bump
-        # `rust-version` in Cargo.toml (and explain why) or drop the
-        # new API.
         toolchain: [stable, "1.85"]
     steps:
       - uses: actions/checkout@v4
@@ -35,13 +48,13 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test --workspace
-        # `--no-default-features` would isolate the `no_std` slice of
-        # `rs1090`, but `rs1090-cli` and `rs1090-serve` need `std`;
-        # default features cover the actual deploy targets. Live RTL
-        # path is gated on the `rtl-sdr` feature which we exclude here
-        # since CI has no USB device.
-        run: cargo test --workspace --no-default-features --features std
+        with:
+          key: test-${{ matrix.toolchain }}
+      # Default features for each crate. rs1090-cli and rs1090-serve
+      # default to `rtl-sdr`, which compiles fine without a USB device
+      # present (nusb's Linux backend doesn't open `/dev/bus/usb` at
+      # build time, only at `open()` call).
+      - run: cargo test --workspace --release
 
   clippy:
     name: clippy
@@ -53,7 +66,9 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --no-default-features --features std -- -D warnings
+        with:
+          key: clippy
+      - run: cargo clippy --workspace --all-targets --release -- -D warnings
 
   fmt:
     name: fmt
@@ -65,3 +80,47 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all --check
+
+  # Cross-build to the aarch64 Pi target. The published deployment
+  # path uses `cargo-zigbuild`, which sidesteps the libdbus sysroot
+  # gymnastics needed by the `ble` feature — we skip `--features ble`
+  # here for the same reason (zig doesn't ship aarch64 libdbus).
+  cross-aarch64:
+    name: cross-build (aarch64-linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-aarch64
+      - name: install zig
+        run: |
+          sudo snap install zig --classic --beta
+          zig version
+      - run: cargo install --locked cargo-zigbuild
+      - run: cargo zigbuild --release --target aarch64-unknown-linux-gnu -p rs1090-serve
+      # Sanity: the resulting binary is an ARM64 ELF executable.
+      - run: file target/aarch64-unknown-linux-gnu/release/rs1090-serve | grep -q "ARM aarch64"
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+      # `--no-deps` keeps this fast and focuses warnings on our
+      # own rustdoc. Default features only — the `ble` feature needs
+      # libdbus, which the docs runner doesn't have, and rustdoc-only
+      # smoke testing of that surface adds work for no gain.
+      - run: cargo doc --no-deps --workspace

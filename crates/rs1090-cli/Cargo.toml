@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Command-line tool for the rs1090 Mode S / ADS-B decoder."
+# Deployment artifact, not a library other crates depend on. Skip
+# crates.io for v0.1; revisit once `live --record` and friends stabilize.
+publish = false
 
 [[bin]]
 name = "rs1090"

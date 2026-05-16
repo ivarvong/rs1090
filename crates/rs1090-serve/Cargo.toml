@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "HTTP/SSE server for the rs1090 Mode S / ADS-B decoder."
+# Deployment artifact with optional system-level deps (libdbus for the
+# BLE feature). Not a library, not on crates.io.
+publish = false
 
 [[bin]]
 name = "rs1090-serve"

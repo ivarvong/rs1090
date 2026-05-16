@@ -1,5 +1,9 @@
 # rs1090
 
+[![ci](https://github.com/ivarvong/rs1090/actions/workflows/ci.yml/badge.svg)](https://github.com/ivarvong/rs1090/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+
 A Mode S / ADS-B decoder in Rust. Library-first, real-time, runs on
 anything from a Raspberry Pi to a beefy x86_64 server. `unsafe` is
 forbidden workspace-wide.

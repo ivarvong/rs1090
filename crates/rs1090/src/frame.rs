@@ -178,8 +178,10 @@ impl Frame {
         self.crc
     }
 
-    /// Aggregate per-bit confidence in `[0, 255]`. See
-    /// [`crate::demod::aggregate_confidence`].
+    /// Aggregate per-bit confidence in `[0, 255]` — the minimum of
+    /// the per-bit confidences from the demodulator's slicer, so one
+    /// bad bit dominates a frame's score. Use this with
+    /// [`FrameDetector::set_min_confidence`] to drop marginal frames.
     #[inline]
     #[must_use]
     pub fn confidence(&self) -> u8 {
