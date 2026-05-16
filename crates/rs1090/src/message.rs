@@ -261,9 +261,11 @@ pub enum Message {
     AllCallReply { icao: Icao },
     /// DF 0, 4, 5, 16, 20, 21: surveillance reply. The CRC is XORed with
     /// the aircraft's ICAO address; without an active-address set we
-    /// cannot validate it here. We surface the raw bytes so the state
-    /// tracker can attempt the address lookup.
-    SurveillanceReply { df: DownlinkFormat, bytes: ArrayString<28> },
+    /// cannot validate it here. We pass the original [`Frame`] through
+    /// so the state tracker can attempt address-XOR recovery — encoding
+    /// (hex, display, etc.) happens at the serialisation boundary, not
+    /// here in the decoded type.
+    SurveillanceReply { frame: Frame },
     /// Reserved/unknown DF.
     Other { df: DownlinkFormat },
 }
@@ -339,12 +341,7 @@ pub fn decode(frame: &Frame) -> Result<Message, DecodeError> {
         | DownlinkFormat::LongAcas
         | DownlinkFormat::CommBAltitude
         | DownlinkFormat::CommBIdentity => {
-            let mut hex = ArrayString::<28>::new();
-            for b in bytes {
-                use core::fmt::Write as _;
-                let _ = write!(hex, "{b:02X}");
-            }
-            Ok(Message::SurveillanceReply { df, bytes: hex })
+            Ok(Message::SurveillanceReply { frame: *frame })
         }
         DownlinkFormat::Reserved(_) => Ok(Message::Other { df }),
     }

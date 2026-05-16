@@ -245,8 +245,11 @@ fn print_message_summary<W: Write>(out: &mut W, msg: &Message) -> io::Result<()>
             }
         }
         Message::AllCallReply { icao } => write!(out, "all-call ICAO={icao}")?,
-        Message::SurveillanceReply { df, bytes } => {
-            write!(out, "surv DF{} bytes={}", df.raw_value(), bytes)?;
+        Message::SurveillanceReply { frame } => {
+            write!(out, "surv DF{} bytes=", frame.downlink_format().raw_value())?;
+            for b in frame.bytes() {
+                write!(out, "{b:02X}")?;
+            }
         }
         Message::Other { df } => write!(out, "other DF{}", df.raw_value())?,
         _ => write!(out, "unhandled")?,
