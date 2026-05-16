@@ -9,6 +9,9 @@ mod broadcaster;
 mod events;
 mod server;
 
+#[cfg(all(target_os = "linux", feature = "ble"))]
+mod ble;
+
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -42,6 +45,13 @@ struct Cli {
     /// Drop frames whose aggregate per-bit confidence is below this.
     #[arg(long, default_value_t = 0)]
     min_confidence: u8,
+
+    /// Also expose a BLE GATT peripheral so iPhone / Android BLE
+    /// debug apps (nRF Connect) can subscribe to live aircraft data
+    /// over Bluetooth. Linux + the `ble` build feature only — silently
+    /// rejected on other targets to keep cross-platform builds clean.
+    #[arg(long)]
+    ble: bool,
 
     #[command(subcommand)]
     source: Source,
@@ -98,6 +108,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let state = AppState::new();
     let bind = cli.bind.clone();
+    let ble_requested = cli.ble;
 
     // Warn loudly when bound publicly per DESIGN.md §12.8.
     if !bind.starts_with("127.0.0.1")
@@ -163,6 +174,15 @@ fn main() -> Result<()> {
         eprintln!("    curl http://{bind}/healthz");
         eprintln!("    curl http://{bind}/aircraft");
         eprintln!("    curl -N http://{bind}/stream");
+
+        // Optional BLE peripheral. Runs in its own task; errors are
+        // logged and the rest of the server keeps going. Linux + `ble`
+        // feature only — on every other build target, the flag is
+        // silently accepted and the spawn is a no-op.
+        if ble_requested {
+            spawn_ble(state.clone());
+        }
+
         axum::serve(listener, server::router(state))
             .with_graceful_shutdown(shutdown_signal())
             .await
@@ -173,6 +193,27 @@ fn main() -> Result<()> {
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     eprintln!("rs1090-serve: shutting down");
+}
+
+/// Linux + `ble` feature: spawn the BLE peripheral task. Any other
+/// target: print a notice and continue — `--ble` is intentionally
+/// not gated by `#[cfg]` so cross-platform builds accept the same
+/// flag set, they just can't honour it.
+#[cfg(all(target_os = "linux", feature = "ble"))]
+fn spawn_ble(state: AppState) {
+    tokio::spawn(async move {
+        if let Err(e) = ble::run(state).await {
+            eprintln!("rs1090-serve: BLE peripheral exited with error: {e:#}");
+        }
+    });
+}
+
+#[cfg(not(all(target_os = "linux", feature = "ble")))]
+fn spawn_ble(_state: AppState) {
+    eprintln!(
+        "rs1090-serve: --ble was set but this build has no BLE support \
+         (Linux + `ble` feature required)"
+    );
 }
 
 /// Synchronous decoder loop, run on a dedicated OS thread.

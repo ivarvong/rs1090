@@ -179,6 +179,72 @@ sudo journalctl -u rs1090-serve -f
 plus a Tailscale-fronted Caddy probe gives self-healing without much
 ceremony.
 
+## BLE peripheral (optional)
+
+The `ble` feature on `rs1090-serve` exposes a Bluetooth Low Energy GATT
+peripheral so iPhone / Android BLE debug apps (nRF Connect, LightBlue)
+can subscribe to live aircraft data without any custom mobile code.
+Three characteristics under one custom service:
+
+- **count** (`u16` LE) — aircraft currently tracked. Read + notify.
+- **nearest** (15 bytes packed binary: ICAO, alt/25, lat×1e6, lon×1e6,
+  track×10) — the lowest-altitude aircraft with a position fix.
+- **summary** (UTF-8) — short human-readable one-liner that fits the
+  default 20-byte ATT MTU.
+
+### Prerequisites on the Pi
+
+```sh
+sudo apt-get install libdbus-1-dev pkg-config
+sudo usermod -aG bluetooth $USER
+# log out and back in for the group change to take effect
+```
+
+### Build
+
+Cross-compiling from a Mac via `cargo-zigbuild` fails on the libdbus
+dependency unless you set up a sysroot — easier to build on the Pi:
+
+```sh
+# On the dev machine: push the source over
+rsync -azh --exclude target --exclude .git --exclude corpus \
+    rs1090/ ivar@<pi>:~/rs1090/
+
+# On the Pi: install rustup, then build
+ssh ivar@<pi>
+curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source ~/.cargo/env
+cd ~/rs1090
+nice -n 10 cargo build --release -p rs1090-serve --features ble -j 1
+```
+
+Use `-j 1` and `nice` — the Zero 2 W has 416 MB usable RAM, and parallel
+rustc instances will thrash swap. Expect ~30 min for a clean build.
+
+### Run
+
+```sh
+~/rs1090/target/release/rs1090-serve --ble --bind 0.0.0.0:8080 live
+```
+
+### Verify from iPhone
+
+Install [nRF Connect for Mobile](https://apps.apple.com/us/app/nrf-connect-for-mobile/id1054362403),
+open it, tap **Scanner**, look for the device named `rs1090`. Tap it to
+connect. The custom service UUID starts `10901090-…` — expand it to see
+the three characteristics. Tap the **notify** icon on any of them to
+subscribe; values update live as aircraft come and go on the SDR.
+
+### Caveats
+
+- BLE range is ~10 m — same room as the Pi works, "across the apartment" doesn't.
+- iOS only scans BLE while the app is foregrounded. Background updates
+  would need iBeacon region monitoring + a custom app — not the
+  debug-app path.
+- The Pi Zero 2 W's BCM43436 chip handles WiFi and BT on one antenna;
+  coexistence is fine at our data rates but heavy WiFi traffic can
+  briefly delay BLE advertisements.
+
 ## Original Pi Zero W (ARMv6) — status
 
 The original Raspberry Pi Zero W (BCM2835, single-core ARMv6 @ 1 GHz,

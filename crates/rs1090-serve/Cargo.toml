@@ -15,6 +15,11 @@ path = "src/main.rs"
 [features]
 default = ["rtl-sdr"]
 rtl-sdr = ["rs1090/rtl-sdr"]
+# Linux-only: spin up a BLE GATT peripheral via BlueZ so iPhone / Android
+# debug apps (nRF Connect, LightBlue) can subscribe to live aircraft
+# summaries over Bluetooth. Pulls in `bluer`, which talks D-Bus and
+# requires libdbus on the target.
+ble = ["dep:bluer"]
 
 [dependencies]
 rs1090 = { workspace = true }
@@ -27,6 +32,9 @@ serde_json = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17", features = ["bluetoothd"], optional = true }
 
 [dev-dependencies]
 rs1090 = { workspace = true, features = ["test-utils"] }
