@@ -71,6 +71,14 @@ cp -n seeds/decode_message/* corpus/decode_message/   # first run only
 cargo +nightly fuzz run decode_message
 ```
 
+## Running on a Raspberry Pi
+
+`rs1090-serve` cross-compiles cleanly to `aarch64-unknown-linux-gnu`
+via `cargo-zigbuild` and runs at ~14% of one core on a Pi Zero 2 W
+with an RTL-SDR dongle. Step-by-step deployment, observed
+performance numbers, and a systemd service unit live in
+[`docs/raspberry-pi.md`](docs/raspberry-pi.md).
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).
