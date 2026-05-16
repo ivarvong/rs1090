@@ -175,7 +175,19 @@
   function isOnApproach(a) {
     if (!Number.isFinite(a.distLga) || a.distLga > MAX_RANGE_NM) return false;
     if (a.alt_ft == null || a.alt_ft > MAX_APPROACH_ALT) return false;
-    return approachRunway(a.track) !== null;
+    if (approachRunway(a.track) === null) return false;
+    // Reject climbing aircraft — track direction alone can't separate
+    // an arrival on runway N from a departure on runway N (same
+    // course). Require descent at >300 fpm, or, if vertical rate is
+    // unavailable, require the aircraft to be at typical
+    // intermediate-approach altitude (below 3000 ft AGL).
+    if (a.vr_mps != null) {
+      const fpm = a.vr_mps * 196.85;
+      if (fpm > -300) return false;
+    } else if (a.alt_ft > 3000) {
+      return false;
+    }
+    return true;
   }
 
   // --- Map setup --------------------------------------------------------------
