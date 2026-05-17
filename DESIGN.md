@@ -29,9 +29,6 @@ Known drifts from the original intent worth flagging here:
   `tokio::sync::broadcast` channel, but the spec'd
   `event: dropped` notifications and per-client queue metrics
   aren't wired up.
-- **TOML config file** (§12.7) isn't implemented — `rs1090-serve`
-  is CLI-flag-only today. `dist/deploy.sh` substitutes per-site
-  values into the systemd `ExecStart` from `dist/.env` instead.
 - **Squawk in the state tracker** (§10) isn't tracked yet.
 
 The principles, threading model, performance budget, security

@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values, installs + enables + restarts in one go, polls `/healthz`
   to verify. Idempotent. Full runbook at
   [`docs/deploy.md`](docs/deploy.md).
+- **TOML config via `--config /etc/rs1090/serve.toml`** —
+  alternative to the `.env`-rendered `ExecStart` path. Every CLI
+  flag has a typed home in the TOML schema, including a `[source]`
+  section that stands in for the `live` / `file` subcommand.
+  Explicit CLI flags still win (precedence resolved via clap's
+  `ValueSource`). Example file ships at
+  `dist/etc/rs1090/serve.toml.example`. Closes #33.
 
 ### Changed
 

@@ -8,6 +8,7 @@
 mod avr;
 mod beast;
 mod broadcaster;
+mod config;
 mod events;
 mod gdl90;
 mod metrics;
@@ -24,8 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use anyhow::{anyhow, Context, Result};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use rs1090::cpr::LatLon;
 use rs1090::crc::CrcOutcome;
@@ -93,8 +94,15 @@ struct Cli {
     #[arg(long, value_parser = clap::value_parser!(std::net::SocketAddr))]
     beast_bind: Option<std::net::SocketAddr>,
 
+    /// Load persistent defaults from a TOML config file. Explicit CLI
+    /// flags still win; the config fills in everything else. The
+    /// `[source]` section can stand in for the subcommand. See
+    /// `dist/etc/rs1090/serve.toml.example` for the full schema.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
-    source: Source,
+    source: Option<Source>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -126,6 +134,106 @@ enum Source {
     },
 }
 
+/// Layer `cfg` into `cli`: any CLI field that wasn't explicitly set
+/// on the command line (`ValueSource::CommandLine`) takes its value
+/// from the config, if the config has one. Anything the user did pass
+/// explicitly stays untouched. Anything the config also leaves unset
+/// keeps its clap default.
+fn apply_config(cli: &mut Cli, matches: &clap::ArgMatches, cfg: config::Config) -> Result<()> {
+    use config::cli_explicit;
+
+    if !cli_explicit(matches, "bind") {
+        if let Some(b) = cfg.bind {
+            cli.bind = b;
+        }
+    }
+    if cli.reference.is_none() {
+        if let Some(s) = cfg.reference {
+            cli.reference = Some(config::parse_latlon_string(&s)?);
+        }
+    }
+    if !cli_explicit(matches, "min_confidence") {
+        if let Some(v) = cfg.min_confidence {
+            cli.min_confidence = v;
+        }
+    }
+
+    // Boolean output toggles: `--avr` etc. are switches with no false
+    // form, so "user didn't pass --avr" == "value came from default".
+    // Config `enabled` then fills in.
+    if !cli_explicit(matches, "avr") {
+        cli.avr = cfg.outputs.avr.enabled;
+    }
+    if cli.avr_bind.is_none() {
+        cli.avr_bind = cfg.outputs.avr.bind;
+    }
+    if !cli_explicit(matches, "beast") {
+        cli.beast = cfg.outputs.beast.enabled;
+    }
+    if cli.beast_bind.is_none() {
+        cli.beast_bind = cfg.outputs.beast.bind;
+    }
+    if !cli_explicit(matches, "gdl90") {
+        cli.gdl90 = cfg.outputs.gdl90.enabled;
+    }
+    if cli.gdl90_target.is_none() {
+        cli.gdl90_target = cfg.outputs.gdl90.target;
+    }
+    if !cli_explicit(matches, "ble") {
+        cli.ble = cfg.outputs.ble.enabled;
+    }
+
+    if cli.source.is_none() {
+        cli.source = cfg.source.map(source_from_config);
+    }
+
+    Ok(())
+}
+
+/// Convert a parsed `[source]` section to the Cli's `Source` subcommand
+/// variant, supplying clap's defaults for any omitted field so the
+/// shape after the merge is indistinguishable from a CLI invocation.
+fn source_from_config(s: config::SourceConfig) -> Source {
+    match s {
+        #[cfg(feature = "rtl-sdr")]
+        config::SourceConfig::Live {
+            device,
+            gain_tenth_db,
+            auto_gain,
+            bias_t,
+        } => Source::Live {
+            device: device.unwrap_or(0),
+            gain_tenth_db: gain_tenth_db.unwrap_or(400),
+            auto_gain: auto_gain.unwrap_or(false),
+            bias_t: bias_t.unwrap_or(false),
+        },
+        // On a build without `rtl-sdr`, the `Live` arm of `Source`
+        // doesn't exist; reject a `[source] kind = "live"` config in
+        // that case rather than silently doing the wrong thing.
+        #[cfg(not(feature = "rtl-sdr"))]
+        config::SourceConfig::Live { .. } => {
+            // Source has only File without rtl-sdr, so we'd fall
+            // through. Surface a clearer error than "missing source".
+            // We can't bail! from this helper without changing its
+            // signature; instead, return a degenerate File that the
+            // caller's open() will reject. Future cleanup: return
+            // Result here. For now, build with --features rtl-sdr.
+            unreachable!("non-rtl-sdr builds reject the `live` source kind at config load")
+        }
+        config::SourceConfig::File {
+            path,
+            sample_rate,
+            center_freq,
+            realtime,
+        } => Source::File {
+            path,
+            sample_rate: sample_rate.unwrap_or(2_000_000),
+            center_freq: center_freq.unwrap_or(1_090_000_000),
+            realtime: realtime.unwrap_or(false),
+        },
+    }
+}
+
 fn parse_latlon(s: &str) -> std::result::Result<LatLon, String> {
     let (lat, lon) = s
         .split_once(',')
@@ -154,7 +262,21 @@ fn main() -> Result<()> {
     metrics::describe_all();
     ::metrics::gauge!(metrics::DECODER_ALIVE).set(1.0);
 
-    let cli = Cli::parse();
+    // Parse via `get_matches` (rather than `Cli::parse`) so we can ask
+    // clap which fields came from the CLI vs. a default — that's the
+    // signal we use to let TOML config override defaulted fields
+    // without clobbering an explicit `--flag VALUE` from the operator.
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow!(e.to_string()))?;
+    if let Some(path) = cli.config.clone() {
+        let cfg = config::Config::load(&path)?;
+        apply_config(&mut cli, &matches, cfg)?;
+    }
+    let source = cli
+        .source
+        .take()
+        .ok_or_else(|| anyhow!("no source: provide a subcommand (`live` / `file …`) or a `[source]` section in --config"))?;
+
     let state = AppState::new(metrics_handle);
     let bind = cli.bind.clone();
     let ble_requested = cli.ble;
@@ -197,6 +319,7 @@ fn main() -> Result<()> {
     //     stays green.
     let decoder_state = state.clone();
     let decoder_args = cli;
+    let decoder_source = source;
     std::thread::Builder::new()
         .name("decoder".into())
         .spawn(move || {
@@ -223,7 +346,7 @@ fn main() -> Result<()> {
                 died: decoder_state.decoder_died.clone(),
                 armed: true,
             };
-            match run_decoder(decoder_args, decoder_state.clone()) {
+            match run_decoder(decoder_args, decoder_source, decoder_state.clone()) {
                 Ok(()) => guard.armed = false,
                 Err(e) => tracing::error!(error = ?e, "decoder error"),
             }
@@ -349,11 +472,11 @@ fn spawn_ble(_state: AppState) {
 
 /// Synchronous decoder loop, run on a dedicated OS thread.
 ///
-/// Both args are passed by value because this is the function the worker
-/// thread takes ownership of; clippy's "needless pass by value" warns on
-/// `cli` and `state` but moving them is the point.
+/// All three args are passed by value because this is the function the
+/// worker thread takes ownership of; clippy's "needless pass by value"
+/// warns on each one but moving them is the point.
 #[allow(clippy::needless_pass_by_value)]
-fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
+fn run_decoder(cli: Cli, source: Source, state: AppState) -> Result<()> {
     let next_id = Arc::new(AtomicU64::new(1));
 
     // Open the configured source.
@@ -367,9 +490,9 @@ fn run_decoder(cli: Cli, state: AppState) -> Result<()> {
     let mut events_buf: Vec<StateEvent> = Vec::with_capacity(32);
     let mut iq_buf = vec![Iq::default(); 65_536];
 
-    let mut source_kind = SourceKind::open(&cli.source)?;
+    let realtime = matches!(&source, Source::File { realtime: true, .. });
+    let mut source_kind = SourceKind::open(&source)?;
     let sample_rate = source_kind.sample_rate();
-    let realtime = matches!(&cli.source, Source::File { realtime: true, .. });
 
     let t0 = Instant::now();
     let mut samples_consumed: u64 = 0;

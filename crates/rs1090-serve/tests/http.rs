@@ -237,3 +237,71 @@ impl Drop for KillOnDrop<'_> {
         let _ = self.0.wait();
     }
 }
+
+/// `--config <toml>` should provide the `[source]` section in place
+/// of the subcommand, and any non-CLI fields should come from the
+/// file. Asserts the round-trip works end-to-end by writing a TOML
+/// pointing at a synthesised IQ file, running `rs1090-serve --config
+/// FILE` with no subcommand, and confirming `/aircraft` shows the
+/// expected frame.
+#[test]
+#[allow(clippy::zombie_processes)]
+fn config_file_provides_source_and_bind() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let iq_path = tmp.path().join("synth.iq");
+    let frame = synth_frame();
+    make_iq_file(&frame, &iq_path);
+
+    let port = 38_422u16;
+    let config_path = tmp.path().join("serve.toml");
+    let toml_body = format!(
+        r#"
+bind = "127.0.0.1:{port}"
+min_confidence = 0
+
+[source]
+kind = "file"
+path = "{path}"
+sample_rate = 2000000
+center_freq = 1090000000
+"#,
+        path = iq_path.to_str().unwrap().replace('\\', "\\\\"),
+    );
+    std::fs::write(&config_path, toml_body).expect("write toml");
+
+    let bin = env!("CARGO_BIN_EXE_rs1090-serve");
+    let mut child = Command::new(bin)
+        .args(["--config", config_path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rs1090-serve");
+    let _kill_on_drop = scopeguard_kill(&mut child);
+
+    // Wait for /healthz.
+    let mut up = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if let Ok(resp) = ureq_get(&format!("http://127.0.0.1:{port}/healthz")) {
+            if resp == "ok" {
+                up = true;
+                break;
+            }
+        }
+    }
+    assert!(up, "rs1090-serve --config never came up on port {port}");
+
+    // Poll /aircraft until the decoded frame is visible.
+    let mut body = String::new();
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        body = ureq_get(&format!("http://127.0.0.1:{port}/aircraft")).expect("aircraft");
+        if body.contains("A1B2C3") {
+            break;
+        }
+    }
+    assert!(
+        body.contains("A1B2C3"),
+        "config-driven run missed ICAO: {body}"
+    );
+}

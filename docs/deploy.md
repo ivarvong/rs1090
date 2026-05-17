@@ -49,7 +49,34 @@ sudo usermod -aG plugdev "$USER"
 A receiver location helps decoding (local-CPR fallback when no
 even/odd pair is available) — capture it once, put it in `dist/.env`.
 
-## Per-deployment config
+## Two ways to configure
+
+`rs1090-serve` reads from two sources, in this precedence order:
+
+1. **CLI flags** — explicit `--bind`, `--reference`, `--gdl90`, etc.
+2. **`--config /etc/rs1090/serve.toml`** — a typed TOML file. See
+   [`dist/etc/rs1090/serve.toml.example`](../dist/etc/rs1090/serve.toml.example)
+   for the full schema. The `[source]` section can stand in for the
+   `live` / `file` subcommand.
+
+Two paths cover the same ground:
+
+- **Mac-side `.env` → rendered into the unit's `ExecStart`** — the
+  default `dist/deploy.sh` path. Stays close to "what the binary
+  was invoked with"; one source of truth per host.
+- **Per-host TOML at `/etc/rs1090/serve.toml`** — set
+  `ExecStart=/usr/local/bin/rs1090-serve --config /etc/rs1090/serve.toml`
+  in the unit, drop the file in place on the Pi. Edits to the file
+  take effect on the next `systemctl restart rs1090-serve`; you
+  don't need to redeploy the unit.
+
+The TOML route is the right choice when you have multiple
+deployments managed in lockstep, or when you want operators to edit
+config without touching shell. The `.env` route is the right choice
+when your unit's `ExecStart` is the canonical record. Pick one;
+they're not meant to be layered.
+
+## Per-deployment config (.env route)
 
 The deploy script reads from `dist/.env`, which is gitignored. Copy
 the example and fill in your values:
@@ -70,6 +97,31 @@ The fields:
 | `RS1090_EXTRA_FLAGS` | `--gdl90 --avr --beast` | Output protocol enables, min-confidence, etc. |
 | `RS1090_SOURCE` | `live --auto-gain` | Subcommand: `live …` (RTL-SDR) or `file PATH …` (replay) |
 | `PI_TARGET` | `aarch64-unknown-linux-gnu` | Rust target triple |
+
+## Per-deployment config (TOML route)
+
+Copy the example into place on the Pi and edit:
+
+```sh
+ssh $PI_USER@$PI_HOST 'sudo mkdir -p /etc/rs1090'
+scp dist/etc/rs1090/serve.toml.example $PI_USER@$PI_HOST:/tmp/serve.toml
+ssh $PI_USER@$PI_HOST 'sudo install -m 0644 /tmp/serve.toml /etc/rs1090/serve.toml'
+ssh -t $PI_USER@$PI_HOST 'sudo $EDITOR /etc/rs1090/serve.toml'
+```
+
+Then point the unit at it, either by editing
+`dist/systemd/rs1090-serve.service` before `install.sh`, or via
+`systemctl edit`:
+
+```ini
+# /etc/systemd/system/rs1090-serve.service.d/override.conf
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/rs1090-serve --config /etc/rs1090/serve.toml
+```
+
+`sudo systemctl restart rs1090-serve` reloads from the config file
+without redeploying.
 
 ## Deploy
 

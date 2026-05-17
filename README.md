@@ -124,7 +124,7 @@ aviation/SDR tools understand, alongside the HTTP/SSE feed:
 | Differential testing against pyModeS | [`docs/differential-testing.md`](docs/differential-testing.md) |
 | Fuzzing with cargo-fuzz | [`docs/fuzzing.md`](docs/fuzzing.md) |
 | Cross-compile + deploy to a Raspberry Pi | [`docs/raspberry-pi.md`](docs/raspberry-pi.md) |
-| Field-ready deployment (systemd, `/metrics`, restart policy) | [`docs/deploy.md`](docs/deploy.md) |
+| Field-ready deployment (systemd, TOML config, `/metrics`, restart policy) | [`docs/deploy.md`](docs/deploy.md) |
 | Release history | [`CHANGELOG.md`](./CHANGELOG.md) |
 
 ## License

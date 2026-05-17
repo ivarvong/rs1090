@@ -1,0 +1,66 @@
+# Example /etc/rs1090/serve.toml — persistent config for rs1090-serve.
+#
+# Copy to /etc/rs1090/serve.toml and edit. Reference from the systemd
+# unit's ExecStart as:
+#
+#     ExecStart=/usr/local/bin/rs1090-serve --config /etc/rs1090/serve.toml
+#
+# CLI flags always override values from this file, so for one-off
+# overrides you can `systemctl edit rs1090-serve` and append flags
+# without rewriting the file.
+
+# HTTP/SSE bind. Use 0.0.0.0 to be reachable from the LAN/Tailnet;
+# 127.0.0.1 to stay loopback-only.
+bind = "0.0.0.0:8080"
+
+# Receiver reference position, "lat,lon" decimal degrees. Enables the
+# local-CPR fallback when no even/odd CPR pair is available — faster
+# first fix from a cold start. Omit to disable local-CPR entirely
+# (global-only decode is always available regardless).
+reference = "40.70214,-73.98262"
+
+# Drop frames whose aggregate per-bit confidence is below this 0..=255
+# threshold. 0 = let everything through (default).
+min_confidence = 0
+
+[outputs.avr]
+# Serve AVR-text (dump1090 `--raw` shape) over TCP. `bind` is optional;
+# default is 0.0.0.0:30002 to match the dump1090 convention.
+enabled = true
+
+[outputs.beast]
+# Serve Beast binary (dump1090-fa `--net-bo-port`) over TCP. `bind`
+# defaults to 0.0.0.0:30005.
+enabled = true
+
+[outputs.gdl90]
+# Broadcast GDL90 traffic reports over UDP for EFB apps (ForeFlight,
+# Garmin Pilot, FlyQ). With no `target`, broadcasts to
+# 255.255.255.255:4000 (LAN default); set to unicast an iPad over
+# Tailscale or a known device.
+enabled = true
+# target = "192.168.1.100:4000"
+
+[outputs.ble]
+# Bluetooth LE GATT peripheral so iPhone / Android BLE debug apps
+# (nRF Connect) can subscribe to live aircraft data. Requires Linux
+# + the `ble` build feature; silently ignored on other targets.
+enabled = false
+
+# Source. `kind = "live"` opens the RTL-SDR dongle; `kind = "file"`
+# replays an .iq capture. The CLI subcommand (`live` / `file PATH …`)
+# overrides this section when both are present.
+[source]
+kind = "live"
+# device = 0
+# gain_tenth_db = 400      # ignored when auto_gain = true
+auto_gain = true
+# bias_t = false           # enable for a powered antenna preamp
+
+# File-source example (uncomment, remove the live block above):
+# [source]
+# kind = "file"
+# path = "/var/lib/rs1090/capture.iq"
+# sample_rate = 2_000_000
+# center_freq = 1_090_000_000
+# realtime = false         # true to pace decode at wall-clock speed
