@@ -305,3 +305,68 @@ center_freq = 1090000000
         "config-driven run missed ICAO: {body}"
     );
 }
+
+/// `--bind` on the CLI must win over `bind = ...` in the config file.
+/// Asserts the binary listens on the CLI-supplied port and ignores
+/// the (different) port baked into the TOML.
+#[test]
+#[allow(clippy::zombie_processes)]
+fn cli_overrides_config_bind() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let iq_path = tmp.path().join("synth.iq");
+    let frame = synth_frame();
+    make_iq_file(&frame, &iq_path);
+
+    // Port the *config* tries to bind. We'll point the *CLI* at a
+    // different port; if precedence works, the CLI port answers and
+    // the config port doesn't.
+    let cli_port = 38_423u16;
+    let config_port = 38_499u16;
+
+    let config_path = tmp.path().join("serve.toml");
+    let toml_body = format!(
+        r#"
+bind = "127.0.0.1:{config_port}"
+
+[source]
+kind = "file"
+path = "{path}"
+"#,
+        path = iq_path.to_str().unwrap().replace('\\', "\\\\"),
+    );
+    std::fs::write(&config_path, toml_body).expect("write toml");
+
+    let bin = env!("CARGO_BIN_EXE_rs1090-serve");
+    let mut child = Command::new(bin)
+        .args([
+            "--bind",
+            &format!("127.0.0.1:{cli_port}"),
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rs1090-serve");
+    let _kill_on_drop = scopeguard_kill(&mut child);
+
+    // CLI port must come up.
+    let mut up = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if let Ok(resp) = ureq_get(&format!("http://127.0.0.1:{cli_port}/healthz")) {
+            if resp == "ok" {
+                up = true;
+                break;
+            }
+        }
+    }
+    assert!(up, "CLI port {cli_port} did not come up");
+
+    // Config port must NOT be listening.
+    let config_resp = ureq_get(&format!("http://127.0.0.1:{config_port}/healthz"));
+    assert!(
+        config_resp.is_err(),
+        "config port {config_port} should not be listening; got: {config_resp:?}"
+    );
+}
