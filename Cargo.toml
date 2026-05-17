@@ -51,15 +51,27 @@ codegen-units = 1
 lto = "thin"
 debug = "line-tables-only"
 
-# Same release optimizations minus LTO. The `release` profile's LTO is
-# the memory-hog of the workspace build — peak rustc RSS during linking
-# of `rs1090-serve` is ~700 MB, which OOMs a 416 MB Pi Zero 2 W even
-# with swap. Use this profile when building on-device.
+# Pi-friendly profile. Release-like, with two concessions to the Pi
+# Zero 2 W's 416 MB RAM:
+#
+# - **LTO off** (`lto = false`). The workspace `release` profile's
+#   thin-LTO link step peaks rustc at ~700 MB, which OOMs the Pi.
+# - **`codegen-units = 16`** (the rustc default), overriding the
+#   `release` profile's `= 1`. With one codegen unit, rustc has to
+#   hold the entire crate's IR in memory at once; for heavy deps
+#   (`bluer` was the OOM trigger when building with `--features ble`)
+#   this is enough to push past 700 MB and trip the kernel OOM-killer
+#   even with 415 MB of swap available. Chunked codegen keeps peak
+#   RSS in a band the Pi can actually service.
+#
+# Runtime cost vs. `release`: marginal — typically a couple of percent
+# on hot-path code, none of which is BLE-related.
 #
 #   cargo build --profile pi -p rs1090-serve --features ble
 [profile.pi]
 inherits = "release"
 lto = false
+codegen-units = 16
 
 [profile.bench]
 codegen-units = 1
