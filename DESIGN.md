@@ -24,6 +24,14 @@ Known drifts from the original intent worth flagging here:
   the original Pi Zero W (ARMv6) is still unmeasured.
 - **Replay buffer for SSE reconnect** (§12.4) is deferred — the
   `Last-Event-ID` header is honoured but no ring buffer is kept.
+- **SSE backpressure** (§12.5) lags rather than drops on slow
+  consumers: subscribers see `RecvError::Lagged` from the
+  `tokio::sync::broadcast` channel, but the spec'd
+  `event: dropped` notifications and per-client queue metrics
+  aren't wired up.
+- **TOML config file** (§12.7) isn't implemented — `rs1090-serve`
+  is CLI-flag-only today. `dist/deploy.sh` substitutes per-site
+  values into the systemd `ExecStart` from `dist/.env` instead.
 - **Squawk in the state tracker** (§10) isn't tracked yet.
 
 The principles, threading model, performance budget, security

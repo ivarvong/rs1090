@@ -94,8 +94,11 @@ has no `rustfmt.toml` — vanilla rustfmt is the canon.
 cargo clippy --workspace --all-targets --release -- -D warnings
 ```
 
-Pedantic-level lints are enabled in workspace `[lints.clippy]`.
-The `--all-targets` flag includes integration tests, benches, and
+Pedantic-level lints are enabled per-crate via the `[lints.clippy]`
+block in each crate's `Cargo.toml` (`module_name_repetitions`,
+`must_use_candidate`, and the two `missing_*_doc` lints are allowed
+crate-wide; everything else in the pedantic group is a warning). The
+`--all-targets` flag includes integration tests, benches, and
 examples — drift in any of them fails locally before CI.
 
 ## Before pushing

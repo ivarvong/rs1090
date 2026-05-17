@@ -99,13 +99,15 @@ Rerun any time. Idempotent.
 Two failure modes worth testing in this order, because the second is
 the one you can only catch in advance.
 
-**Crash recovery** — the LivenessGuard wired in #32 turns any decoder
-exit into a non-zero process exit; systemd's `Restart=on-failure`
-brings it back inside `RestartSec=5s`. The same path covers a
-yanked / failed RTL-SDR dongle: `rs-rtl` gives up after five
-consecutive bulk-transfer errors, the live source returns `Ok(0)`,
-the decoder loop turns that into an `anyhow::bail!` (live only —
-file replay still EOFs cleanly), and systemd restarts.
+**Crash recovery** — the `LivenessGuard` in
+`crates/rs1090-serve/src/main.rs` turns any abnormal decoder exit
+(panic, returned `Err`, dropped on unwind) into a non-zero process
+exit; systemd's `Restart=on-failure` brings it back inside
+`RestartSec=5s`. The same path covers a yanked / failed RTL-SDR
+dongle: `rs-rtl` gives up after five consecutive bulk-transfer
+errors, the live source returns `Ok(0)`, the decoder loop turns
+that into an `anyhow::bail!` (live only — file replay still EOFs
+cleanly), and systemd restarts.
 
 ```sh
 ssh $PI_USER@$PI_HOST 'sudo pkill -SIGABRT rs1090-serve'
@@ -151,6 +153,28 @@ curl -s http://$PI_HOST:8080/metrics | grep -E '^rs1090_'
 ssh $PI_USER@$PI_HOST 'sudo systemctl stop rs1090-serve'
 ssh $PI_USER@$PI_HOST 'sudo systemctl disable rs1090-serve'
 ```
+
+## Prometheus metrics
+
+`/metrics` exposes five low-cardinality series — point a scraper at
+`http://$PI_HOST:8080/metrics` and you get:
+
+| Metric | Type | Purpose |
+|---|---|---|
+| `rs1090_frames_total{outcome=clean\|corrected\|failed}` | counter | per-frame throughput, broken out by CRC outcome |
+| `rs1090_state_events_total{kind=acquired\|identification\|position\|velocity\|address_recovered\|orphan\|lost}` | counter | per-event tracker output |
+| `rs1090_aircraft_tracked` | gauge | current tracker table size |
+| `rs1090_sse_subscribers` | gauge | live SSE clients on `/stream` |
+| `rs1090_decoder_alive` | gauge | 1 while the decoder thread is alive, 0 once it has died |
+
+Plenty for a Grafana panel — frames/sec rate, corrected-frame ratio
+(noise-floor proxy), aircraft trend, alert on
+`rs1090_decoder_alive == 0` (or just `up == 0`, since the LivenessGuard
+exits the process and the scrape goes silent).
+
+There are no per-ICAO labels on purpose — that would blow up the
+time-series count for no operational gain. Aircraft state lives in
+the tracker, not in metrics.
 
 ## Troubleshooting
 

@@ -40,7 +40,10 @@ Zero W (ARMv6)" section below for the current status.
    ```
 
    Output: `target/aarch64-unknown-linux-gnu/release/rs1090-serve`
-   (about 11 MB, dynamically linked against glibc).
+   (about 11 MB, dynamically linked against glibc). The Pi runs
+   glibc 2.38 (Debian 13); Zig's glibc shim emits backward-compatible
+   symbol versions so the same binary runs on any Debian-family Pi
+   OS from Debian 12 (bookworm) onward.
 
 2. **Copy it to the Pi.**
 
@@ -134,79 +137,22 @@ against pyModeS. The Pi capture is now part of the differential-test
 corpus, validating that the same binary produces identical decoded
 output on the Pi's signal chain as the dev host's.
 
-## Updating the binary
+## Field-ready deployment (systemd, restart-on-failure, `/metrics`)
 
-```sh
-cargo zigbuild --release -p rs1090-serve --target aarch64-unknown-linux-gnu
-ssh ivar@<pi> 'pkill rs1090-serve 2>/dev/null; sleep 1'
-scp target/aarch64-unknown-linux-gnu/release/rs1090-serve ivar@<pi>:~/rs1090-serve
-ssh ivar@<pi> 'chmod +x ~/rs1090-serve && ~/rs1090-serve --bind 0.0.0.0:8080 live &'
-```
+The "manual scp + run in the foreground" flow above is for first-light
+exploration. Once it's working and you want it to survive reboots and
+dongle hiccups, switch to the **scripted deploy + systemd path** in
+[`docs/deploy.md`](deploy.md):
 
-The dynamic-linker version of glibc on the Pi is 2.38 (Debian 13); the
-cross-compiled binary embeds compatible symbol versions via Zig's
-glibc shim, so the same binary should run on any reasonably recent
-Debian-family Pi OS.
-
-## Running it as a systemd service
-
-The repo ships a ready-to-install unit at
-[`dist/systemd/rs1090-serve.service`](../dist/systemd/rs1090-serve.service)
-with an `install.sh` helper next to it:
-
-```sh
-# On the Mac: build and ship the binary to the system path the unit expects.
-cargo zigbuild --release -p rs1090-serve --target aarch64-unknown-linux-gnu
-scp target/aarch64-unknown-linux-gnu/release/rs1090-serve ivar@<pi>:/tmp/rs1090-serve
-ssh ivar@<pi> 'sudo install -m 0755 /tmp/rs1090-serve /usr/local/bin/rs1090-serve'
-
-# Ship the unit + install helper.
-rsync -azh dist/systemd/ ivar@<pi>:/tmp/rs1090-systemd/
-ssh ivar@<pi> 'sudo /tmp/rs1090-systemd/install.sh'
-```
-
-The unit ships `Restart=on-failure`, `RestartSec=5s`, and
-`StartLimitIntervalSec=0` (so a flaky USB cable can disconnect every
-30s indefinitely without tripping flap protection). `WantedBy=multi-user.target`
-plus `systemctl enable` from the installer means the service comes
-back automatically after a reboot.
-
-Edit the `ExecStart=` line in the unit before installing, or layer
-your overrides on top with `sudo systemctl edit rs1090-serve`:
-
-```ini
-# /etc/systemd/system/rs1090-serve.service.d/override.conf
-[Service]
-ExecStart=
-ExecStart=/usr/local/bin/rs1090-serve \
-    --bind 0.0.0.0:8080 \
-    --reference 40.70,-73.99 \
-    --gdl90-target 192.168.1.100:4000 \
-    --avr \
-    --beast \
-    live --auto-gain
-```
-
-(The first empty `ExecStart=` clears the inherited value — required
-by systemd whenever you override `ExecStart` from a drop-in.)
-
-`/healthz` returns 503 if the decoder thread has died, so `Restart=on-failure`
-plus a Tailscale-fronted Caddy probe gives self-healing without much
-ceremony.
-
-`/metrics` exposes Prometheus counters and gauges — point a scraper at it
-and you get:
-
-| Metric | Type | Purpose |
-|---|---|---|
-| `rs1090_frames_total{outcome=clean|corrected|failed}` | counter | per-frame throughput, broken out by CRC outcome |
-| `rs1090_state_events_total{kind=...}` | counter | per-event tracker output (acquired, position, velocity, …) |
-| `rs1090_aircraft_tracked` | gauge | current tracker table size |
-| `rs1090_sse_subscribers` | gauge | live SSE clients on `/stream` |
-| `rs1090_decoder_alive` | gauge | 1 while the decoder thread is alive, 0 once it has died |
-
-Plenty for a Grafana panel — frames/sec rate, corrected-frame ratio
-(noise-floor proxy), aircraft trend, alert on `rs1090_decoder_alive == 0`.
+- Shipped systemd unit at `dist/systemd/rs1090-serve.service` (hardened:
+  `Restart=on-failure`, `StartLimitIntervalSec=0`, `ProtectSystem=strict`,
+  the usual sandboxing knobs).
+- One-command remote deploy via `dist/deploy.sh` driven by
+  `dist/.env` (gitignored, per-deployment values: PI host, user,
+  receiver coordinates, output flags).
+- Prometheus `/metrics` scrape table + Grafana / alerting playbook.
+- End-to-end verification recipes for both crash-recovery and
+  reboot-autostart.
 
 ## BLE peripheral (optional)
 
@@ -244,16 +190,19 @@ ssh ivar@<pi>
 curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 source ~/.cargo/env
 cd ~/rs1090
-nice -n 10 cargo build --release -p rs1090-serve --features ble -j 1
+nice -n 10 cargo build --profile pi -p rs1090-serve --features ble -j 1
 ```
 
 Use `-j 1` and `nice` — the Zero 2 W has 416 MB usable RAM, and parallel
-rustc instances will thrash swap. Expect ~30 min for a clean build.
+rustc instances will thrash swap. The `--profile pi` profile inherits
+the release settings but disables LTO; the workspace `release` profile's
+LTO link step OOMs the Zero 2 W even with `-j 1` (peak rustc RSS during
+the link is ~700 MB). Expect ~30 min for a clean build.
 
 ### Run
 
 ```sh
-~/rs1090/target/release/rs1090-serve --ble --bind 0.0.0.0:8080 live
+~/rs1090/target/pi/rs1090-serve --ble --bind 0.0.0.0:8080 live
 ```
 
 ### Verify from iPhone

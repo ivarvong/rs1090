@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Structured logging via `tracing`** in `rs1090-serve` — every prior
+  `eprintln!` is now a `tracing` event with the right level and
+  structured fields. `RUST_LOG=warn,rs1090_serve=info,rs1090=info` is
+  the default filter; override via `RUST_LOG` like any other
+  tracing app.
+- **Prometheus `/metrics` endpoint** on `rs1090-serve`:
+  - `rs1090_frames_total{outcome=clean|corrected|failed}` (counter)
+  - `rs1090_state_events_total{kind=acquired|identification|position|velocity|address_recovered|orphan|lost}` (counter)
+  - `rs1090_aircraft_tracked` (gauge)
+  - `rs1090_sse_subscribers` (gauge, RAII-decremented when a client
+    drops)
+  - `rs1090_decoder_alive` (gauge, mirrors `/healthz`)
+  Labels are deliberately low-cardinality (no per-ICAO tags). See
+  [`docs/deploy.md`](docs/deploy.md#prometheus-metrics) for the
+  Grafana / alerting playbook.
+- **Shippable systemd unit** at
+  [`dist/systemd/rs1090-serve.service`](dist/systemd/rs1090-serve.service)
+  with `install.sh` next to it. Hardening over the previous
+  inline-in-docs unit: `StartLimitIntervalSec=0` so flap-protection
+  never gives up on a chronically-flaky USB cable;
+  `ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp` and the
+  rest of the sandboxing knobs that match what the service actually
+  needs (USB + a listen socket).
+- **One-command remote deploy** via `dist/deploy.sh` driven by
+  `dist/.env` (gitignored). Cross-compiles with `cargo-zigbuild`,
+  scps the binary, renders the unit's `ExecStart` with per-site
+  values, installs + enables + restarts in one go, polls `/healthz`
+  to verify. Idempotent. Full runbook at
+  [`docs/deploy.md`](docs/deploy.md).
+
+### Changed
+
+- **Decoder death exits the process.** The `LivenessGuard` in
+  `rs1090-serve` (added M6) used to flip `/healthz` to 503 and leave
+  the HTTP server running on a frozen snapshot. Now it also notifies
+  the tokio runtime, which closes the listener; `main` returns
+  `exit(1)` so systemd's `Restart=on-failure` brings the process
+  back. The old behaviour is what most operators thought was a bug.
+- **Live-source `Ok(0)` reads are fatal.** When the `rs-rtl`
+  streaming thread gives up after five consecutive bulk-transfer
+  errors (dongle yanked, USB reset), the `SampleSource::read`
+  returns `Ok(0)`. The decoder loop previously treated that as
+  clean file-EOF and stayed running; now it `bail!`s, the
+  LivenessGuard fires, and systemd brings us back. File replay
+  still EOFs cleanly so `… file capture.iq` keeps serving the
+  final snapshot until Ctrl-C.
+
 ## [0.1.0] — 2026-05-16
 
 First tagged release. The full pipeline — `Iq` samples → demod → CRC →
@@ -181,8 +230,10 @@ disagreements on the 2-minute corpus.
   slow consumers (subscribers see `RecvError::Lagged`); DESIGN.md
   calls for explicit `event: dropped` notifications and per-client
   queue metrics, which are not yet wired up.
-- Auth, Prometheus `/metrics`, bbox filter, CORS configuration. All
-  trivial individually; deferred until the use case is concrete.
+- Auth and CORS configuration — still deferred until the use case
+  is concrete. (Prometheus `/metrics` and the bbox + altitude
+  filters subsequently landed; see `[Unreleased]` and the README's
+  "Stream filters" table.)
 
 ### Fixed
 
@@ -234,7 +285,8 @@ disagreements on the 2-minute corpus.
   blocks in CLI, broadcaster, and events into one method.
 - **GitHub Actions CI** at `.github/workflows/ci.yml` — `cargo test`,
   `cargo clippy -- -D warnings`, `cargo fmt --check`, and an MSRV
-  matrix row pinned at the workspace `rust-version = "1.85"`.
+  matrix row pinned at the workspace `rust-version` (1.85 at M6,
+  bumped to 1.88 in v0.1.0 when `time = 0.3.47` required it).
 - **Raspberry Pi deployment guide** at [`docs/raspberry-pi.md`](docs/raspberry-pi.md),
   validated end-to-end on a Pi Zero 2 W with an RTL-SDR dongle.
   Cross-compile via `cargo-zigbuild` targeting

@@ -28,7 +28,9 @@ below cover every reproducible workflow.
 - `crates/rs1090-cli` — `replay`, `track`, and `live` subcommands.
 - `crates/rs1090-serve` — HTTP server with `/aircraft`,
   `/aircraft/:icao`, `/healthz`, `/metrics` (Prometheus), `/stream`
-  (Server-Sent Events), and `/` (live Leaflet map).
+  (Server-Sent Events), `/` (live Leaflet map), and `/approach`
+  (purpose-built approach-watch page; airport selected via
+  `?airport=lga|jfk|ewr` or `?ref=LAT,LON&runways=…`).
 - `scripts/` — `diff_pymodes.py` differential-test harness,
   `s8_to_uc8` Cargo example for UC8 conversion.
 
@@ -122,6 +124,7 @@ aviation/SDR tools understand, alongside the HTTP/SSE feed:
 | Differential testing against pyModeS | [`docs/differential-testing.md`](docs/differential-testing.md) |
 | Fuzzing with cargo-fuzz | [`docs/fuzzing.md`](docs/fuzzing.md) |
 | Cross-compile + deploy to a Raspberry Pi | [`docs/raspberry-pi.md`](docs/raspberry-pi.md) |
+| Field-ready deployment (systemd, `/metrics`, restart policy) | [`docs/deploy.md`](docs/deploy.md) |
 | Release history | [`CHANGELOG.md`](./CHANGELOG.md) |
 
 ## License

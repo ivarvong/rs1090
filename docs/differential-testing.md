@@ -105,7 +105,7 @@ The shape:
 2. Sample disagreements all show `rs1090 = X, pms = X-1` — exactly +1 kt.
 3. Investigate: `decode_velocity` was rounding `hypot(ew, ns)` while
    pyModeS truncates.
-4. Fix: `.round() as u16` → `.trunc() as u16` at `message.rs:494`.
+4. Fix: `.round() as u16` → `.trunc() as u16` in `decode_velocity`.
 5. Pin: add a unit test using a real ME byte slice from the disagreeing
    frame, asserting the truncated value.
 6. Re-run harness: 0 disagreements.
