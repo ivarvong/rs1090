@@ -370,3 +370,93 @@ path = "{path}"
         "config port {config_port} should not be listening; got: {config_resp:?}"
     );
 }
+
+/// Reconnect with `Last-Event-ID: 0` after the decoder has finished
+/// emitting events. Asserts the replay buffer hands the missed
+/// events back rather than the client seeing only future events.
+#[test]
+#[allow(clippy::zombie_processes)]
+fn last_event_id_replay_resends_missed_events() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let iq_path = tmp.path().join("synth.iq");
+    let frame = synth_frame();
+    make_iq_file(&frame, &iq_path);
+
+    let port = 38_424u16;
+    let mut child = spawn_serve(&iq_path, port);
+    let _kill_on_drop = scopeguard_kill(&mut child);
+
+    // Wait for the decoder to finish — `/aircraft` showing the ICAO
+    // is the signal that the synth frame has been broadcast (and
+    // therefore pushed into the replay ring).
+    let mut up = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        let body = ureq_get(&format!("http://127.0.0.1:{port}/aircraft")).expect("aircraft");
+        if body.contains("A1B2C3") {
+            up = true;
+            break;
+        }
+    }
+    assert!(up, "decoder never produced our frame on port {port}");
+
+    // Reconnect to /stream asking for everything since id 0. With
+    // the replay buffer wired in, this must surface the two events
+    // (acquired + identification) emitted while we were "away".
+    // Without it, the SSE stream would just keep-alive without any
+    // body data — the broadcaster has no historical receiver.
+    let body = sse_read_window(&format!("http://127.0.0.1:{port}/stream"), 0, 500);
+    assert!(
+        body.contains("event: acquired"),
+        "replay missing acquired event; body so far: {body:?}"
+    );
+    assert!(
+        body.contains("event: identification"),
+        "replay missing identification event; body so far: {body:?}"
+    );
+    assert!(
+        body.contains("\"icao\":\"A1B2C3\""),
+        "replay missing our ICAO; body so far: {body:?}"
+    );
+}
+
+/// Open a /stream GET with `Last-Event-ID: <last>` and read the
+/// response body for `read_ms` milliseconds, then close. Used to
+/// snapshot a slice of an otherwise-keepalive SSE stream for an
+/// assertion. Returns whatever bytes arrived in that window as a
+/// String (lossy UTF-8).
+fn sse_read_window(url: &str, last: u64, read_ms: u64) -> String {
+    use std::io::Read;
+    use std::net::TcpStream;
+    let url = url.trim_start_matches("http://");
+    let (host_port, path) = url.split_once('/').unwrap_or((url, ""));
+    let path = format!("/{path}");
+    let mut stream = TcpStream::connect(host_port).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(read_ms)))
+        .expect("set timeout");
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\n\
+         Host: {host_port}\r\n\
+         Last-Event-ID: {last}\r\n\
+         Accept: text/event-stream\r\n\
+         Connection: close\r\n\r\n"
+    )
+    .expect("write request");
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    let mut buf = [0u8; 8 * 1024];
+    while start.elapsed() < Duration::from_millis(read_ms) {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            // WouldBlock fires when the per-read timeout expires
+            // mid-stream (no more data right now); we stop and
+            // return what we have.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&raw).to_string()
+}

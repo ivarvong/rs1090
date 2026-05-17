@@ -536,6 +536,7 @@ fn run_decoder(cli: Cli, source: Source, state: AppState) -> Result<()> {
         let tx = state.broadcaster.clone();
         let frame_tx = state.frame_broadcaster.clone();
         let snapshot = state.snapshot.clone();
+        let replay = state.replay.clone();
         let next_id = next_id.clone();
 
         detector.process(&iq_buf[..n], |frame| {
@@ -567,6 +568,12 @@ fn run_decoder(cli: Cli, source: Source, state: AppState) -> Result<()> {
                         id: next_id.fetch_add(1, Ordering::Relaxed),
                         event: wire,
                     };
+                    // Push to the replay ring *before* the broadcast send.
+                    // A reconnecting subscriber subscribes-then-snapshots
+                    // (server.rs), so as long as the ring update is
+                    // visible before the broadcast lands, there's no
+                    // race window in which an event escapes both paths.
+                    crate::broadcaster::push_replay(&replay, env.clone());
                     // `send` errors only when there are zero receivers, which
                     // means no clients are connected. Drop silently.
                     let _ = tx.send(env);

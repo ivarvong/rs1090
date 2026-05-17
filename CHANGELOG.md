@@ -45,6 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Explicit CLI flags still win (precedence resolved via clap's
   `ValueSource`). Example file ships at
   `dist/etc/rs1090/serve.toml.example`. Closes #33.
+- **SSE replay buffer for `Last-Event-ID` reconnects** (DESIGN
+  §12.4). Bounded ring of the last 4096 event envelopes lives in
+  `AppState.replay`; the decoder loop pushes each envelope to the
+  ring *before* the broadcast send, and the SSE stream handler
+  subscribes to the broadcast *before* snapshotting the ring — the
+  two orderings between them guarantee no event escapes both
+  paths. On reconnect, the handler chains the replay slice with
+  `id > Last-Event-ID` ahead of the live stream and dedupes any
+  overlap by a running `max_emitted` high-water mark. At the
+  observed live rate (~100 events/s on the Pi Zero 2 W) this
+  buffers ~40 s of history, which covers a transient network blip
+  without growing unbounded. Pinned by an integration test
+  (`last_event_id_replay_resends_missed_events`) that reconnects
+  after the decoder finishes and asserts the missed events come
+  back over the wire.
 
 ### Changed
 

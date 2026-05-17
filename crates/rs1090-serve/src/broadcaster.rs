@@ -20,9 +20,9 @@
 //!   subscribers are far behind, and individual receivers see
 //!   `RecvError::Lagged(n)` so they know how many they missed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::sync::{broadcast, Notify};
@@ -39,6 +39,18 @@ use crate::events::{
 /// receiver position; events older than this many positions before the
 /// slowest receiver get dropped (and that receiver sees `RecvError::Lagged`).
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
+
+/// Recent-event ring buffer capacity, in events. Per DESIGN.md §12.4:
+/// when an SSE client reconnects with `Last-Event-ID: N`, the server
+/// replays any events with id > N from this ring before subscribing
+/// the client to the live broadcast. Sized the same as the broadcast
+/// channel so a client that fully exhausts the broadcast (forcing
+/// `RecvError::Lagged`) can still recover the same window from here.
+///
+/// 4096 events at the ~100/s live rate observed on the Pi Zero 2 W is
+/// ~40 s of replay history — plenty for a transient network blip, far
+/// short of "indefinite buffering" that would grow unbounded.
+pub const REPLAY_CAPACITY: usize = 4096;
 
 /// Shared state cloned into every axum handler.
 #[derive(Clone)]
@@ -69,6 +81,14 @@ pub struct AppState {
     /// Prometheus exposition handle. Cloned cheaply; the `/metrics`
     /// HTTP handler calls `.render()` on it to produce the text.
     pub metrics: PrometheusHandle,
+    /// Ring buffer of the last [`REPLAY_CAPACITY`] event envelopes.
+    /// Written by the decoder loop (one lock per state event; the
+    /// critical section is two `VecDeque` ops); read on SSE reconnect
+    /// to serve the `Last-Event-ID` replay gap. A `std::sync::Mutex`
+    /// is the right primitive: writes are bursty but trivially short
+    /// and reads are rare (only on reconnect), so contention is near
+    /// zero in practice.
+    pub replay: Arc<Mutex<VecDeque<EventEnvelope>>>,
 }
 
 impl AppState {
@@ -82,8 +102,34 @@ impl AppState {
             decoder_alive: Arc::new(AtomicBool::new(true)),
             decoder_died: Arc::new(Notify::new()),
             metrics,
+            replay: Arc::new(Mutex::new(VecDeque::with_capacity(REPLAY_CAPACITY))),
         }
     }
+}
+
+/// Append an envelope to the replay ring, evicting the oldest entry
+/// when the capacity is reached. Caller must hold no other locks; the
+/// critical section is two `VecDeque` ops so it returns near-instantly.
+pub fn push_replay(replay: &Mutex<VecDeque<EventEnvelope>>, env: EventEnvelope) {
+    let mut ring = replay.lock().expect("replay lock poisoned");
+    if ring.len() >= REPLAY_CAPACITY {
+        ring.pop_front();
+    }
+    ring.push_back(env);
+}
+
+/// Snapshot the slice of replay events with `id > last_event_id`.
+/// Cloned out from under the lock so the caller can yield without
+/// blocking the decoder.
+pub fn replay_after(
+    replay: &Mutex<VecDeque<EventEnvelope>>,
+    last_event_id: u64,
+) -> Vec<EventEnvelope> {
+    let ring = replay.lock().expect("replay lock poisoned");
+    ring.iter()
+        .filter(|e| e.id > last_event_id)
+        .cloned()
+        .collect()
 }
 
 /// Build a JSON-ready snapshot from a tracked aircraft.

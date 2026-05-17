@@ -22,8 +22,6 @@ Known drifts from the original intent worth flagging here:
 - **Self-hosted Pi Zero W CI runner** (§13.7) doesn't exist. The
   Pi Zero 2 W has been measured (~14% of one A53 core, ~5 MB RSS);
   the original Pi Zero W (ARMv6) is still unmeasured.
-- **Replay buffer for SSE reconnect** (§12.4) is deferred — the
-  `Last-Event-ID` header is honoured but no ring buffer is kept.
 - **SSE backpressure** (§12.5) lags rather than drops on slow
   consumers: subscribers see `RecvError::Lagged` from the
   `tokio::sync::broadcast` channel, but the spec'd

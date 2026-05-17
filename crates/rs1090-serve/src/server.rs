@@ -203,7 +203,7 @@ async fn stream(
     // Subscribe before doing any filtering work so we don't miss events
     // emitted between filter setup and the receiver attaching.
     let rx = state.broadcaster.subscribe();
-    let stream = BroadcastStream::new(rx);
+    let live_stream = BroadcastStream::new(rx);
     ::metrics::gauge!(crate::metrics::SSE_SUBSCRIBERS).increment(1.0);
     let subscriber_guard = SseSubscriberGuard;
 
@@ -228,26 +228,63 @@ async fn stream(
     let needs_aircraft_lookup = bbox_filter.is_some() || alt_min.is_some() || alt_max.is_some();
 
     // Last-Event-ID: the client may include this header to resume from a
-    // specific event id after reconnect. We don't yet maintain a replay
-    // buffer (that lands once we observe a real-world reconnect pattern),
-    // but we honour the header by advancing past `id <= last_event_id`
-    // in the live stream when it shows up. Clients that don't set it
-    // get all live events from the moment they connect.
+    // specific event id after reconnect. Replay any events with id >
+    // last_event_id that we still have in the in-memory ring (see
+    // `broadcaster::REPLAY_CAPACITY` for the depth), then continue
+    // with the live stream from where the subscriber attached. Clients
+    // that don't set the header get the live stream only, starting
+    // from the moment they connect.
     let last_event_id: Option<u64> = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok());
+
+    // Snapshot the replay window once. Subscription to the broadcast
+    // happened first above, so any event that lands between this
+    // snapshot and our broadcast cursor will arrive via the live
+    // stream — `max_emitted` below dedupes the overlap.
+    let replay_prefix: Vec<EventEnvelope> = if let Some(last) = last_event_id {
+        crate::broadcaster::replay_after(&state.replay, last)
+    } else {
+        Vec::new()
+    };
+
+    // Producer-side ordering invariant (see decoder loop in main.rs):
+    //   1. push envelope to the replay ring
+    //   2. broadcast::Sender::send
+    // and consumer-side (this function):
+    //   1. broadcast::Sender::subscribe
+    //   2. snapshot the replay ring
+    // Together those guarantee no event is missed: any event added to
+    // the ring before our snapshot was sent before our subscribe
+    // would have been (so the receiver got it), and any event added
+    // after our snapshot is also after our subscribe (so the receiver
+    // will get it). Overlap can happen — the same id appearing in both
+    // replay and live — which the `max_emitted` filter below collapses.
+
+    let replay_stream = tokio_stream::iter(
+        replay_prefix
+            .into_iter()
+            .map(Ok::<EventEnvelope, tokio_stream::wrappers::errors::BroadcastStreamRecvError>),
+    );
+    let stream = replay_stream.chain(live_stream);
+
+    // Single high-water mark of "what we've already emitted to this
+    // client", initialised to last_event_id so replay events come
+    // through and bumped as we forward each one. The same check
+    // dedupes any overlap between replay and live for events that
+    // were both in the ring and in the broadcast cursor.
+    let mut max_emitted: u64 = last_event_id.unwrap_or(0);
 
     let filtered = stream.filter_map(move |item| {
         // Capture the guard by reference inside the closure so it
         // moves into the stream's state and drops with the stream.
         let _ = &subscriber_guard;
         let env = item.ok()?;
-        if let Some(min) = last_event_id {
-            if env.id <= min {
-                return None;
-            }
+        if env.id <= max_emitted {
+            return None;
         }
+        max_emitted = env.id;
         if let Some(types) = &type_filter {
             if !types.contains(env.event.tag()) {
                 return None;
