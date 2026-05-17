@@ -10,9 +10,9 @@
 //!   takes everything from the file (typical systemd install).
 //! - **CLI only**: same as before — the binary needs no config file.
 //!
-//! Precedence is resolved in [`merge_into_cli`] using clap's
-//! [`ValueSource`] so we can tell `--bind 0.0.0.0:8080` (explicit) from
-//! a clap-supplied default with the same string value.
+//! Precedence is resolved in `main::apply_config` using clap's
+//! [`ValueSource`] so we can tell `--bind 0.0.0.0:8080` (explicit)
+//! from a clap-supplied default with the same string value.
 
 use std::fs;
 use std::net::SocketAddr;

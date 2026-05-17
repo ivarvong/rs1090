@@ -103,16 +103,21 @@ examples — drift in any of them fails locally before CI.
 
 ## Before pushing
 
-Three commands, in this order, must come up green:
+Four commands, in this order, must come up green:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --release -- -D warnings
 cargo test --workspace --release
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 ```
 
 If any of them fails locally, CI will fail the same way. The CI
-workflow file at `.github/workflows/ci.yml` runs exactly these.
+workflow file at `.github/workflows/ci.yml` runs exactly these
+(plus an `aarch64-linux` cross-build smoke and an `ble` compile-
+check on Linux). The rustdoc step is easy to forget locally —
+broken intra-doc links don't show up under `clippy`, only under
+`cargo doc`.
 
 ## Running the binaries locally
 
