@@ -124,3 +124,24 @@ jobs:
       # libdbus, which the docs runner doesn't have, and rustdoc-only
       # smoke testing of that surface adds work for no gain.
       - run: cargo doc --no-deps --workspace
+
+  # Compile-check the Linux-only `ble` feature. We can't run the BLE
+  # path in CI (no Bluetooth radio, no D-Bus session), but `cargo
+  # check` over the feature surface catches the easy regression: a
+  # signature drift in `ble.rs` that nobody noticed locally because
+  # the dev machine wasn't running with `--features ble`. Lives in
+  # its own job so the libdbus install doesn't slow the main test
+  # row.
+  ble-check:
+    name: ble compile-check (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ble-check
+      - run: cargo check -p rs1090-serve --features ble
