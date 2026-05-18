@@ -132,6 +132,16 @@ struct StreamParams {
     alt_min: Option<i32>,
     /// Upper altitude bound in feet, inclusive.
     alt_max: Option<i32>,
+    /// Origin latitude for a radius filter (decimal degrees).
+    origin_lat: Option<f64>,
+    /// Origin longitude for a radius filter (decimal degrees).
+    origin_lon: Option<f64>,
+    /// Maximum great-circle distance in nautical miles from
+    /// (`origin_lat`, `origin_lon`). Aircraft outside this radius are
+    /// filtered out. All three of `origin_lat`, `origin_lon`, and
+    /// `max_distance_nm` must be present for the radius filter to
+    /// engage; any one missing disables it.
+    max_distance_nm: Option<f64>,
 }
 
 /// Parsed bounding box in `(min_lat, min_lon, max_lat, max_lon)` order.
@@ -179,6 +189,36 @@ impl Bbox {
     }
 }
 
+/// Parsed radius filter: phone (or any other receiver) at (`lat`, `lon`)
+/// wants aircraft within `max_nm` nautical miles. Used by the iOS app
+/// (and any other client with the receiver's known location) to ask
+/// the server to do the distance cull, rather than streaming every
+/// aircraft and dropping most on the client side.
+#[derive(Debug, Clone, Copy)]
+struct RadiusFilter {
+    lat: f64,
+    lon: f64,
+    max_nm: f64,
+}
+
+impl RadiusFilter {
+    /// True iff (`lat`, `lon`) is within `max_nm` of the origin. The
+    /// great-circle distance is computed via the standard haversine
+    /// formula; at the radii relevant here (≤ ~250 nm, the practical
+    /// 1090 MHz line-of-sight horizon) the spherical-Earth assumption
+    /// is well under 0.1% error against WGS-84.
+    fn contains(&self, lat: f64, lon: f64) -> bool {
+        const EARTH_RADIUS_NM: f64 = 3440.065; // mean Earth radius
+        let lat1 = self.lat.to_radians();
+        let lat2 = lat.to_radians();
+        let dlat = (lat - self.lat).to_radians();
+        let dlon = (lon - self.lon).to_radians();
+        let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+        let c = 2.0 * a.sqrt().asin();
+        EARTH_RADIUS_NM * c <= self.max_nm
+    }
+}
+
 /// RAII counter for the `rs1090_sse_subscribers` gauge.
 ///
 /// We can't tie the gauge to the underlying `broadcast::Receiver`
@@ -195,6 +235,13 @@ impl Drop for SseSubscriberGuard {
     }
 }
 
+// Stream is the wiring point for every stream-side concern — filter
+// parsing, replay snapshot, broadcast subscription, dedup state.
+// Splitting it for the line-count lint would fragment that boot
+// story across several helpers and obscure the ordering invariant
+// (subscribe before snapshot; max_emitted bumps across the join)
+// that's the whole correctness story for the replay path.
+#[allow(clippy::too_many_lines)]
 async fn stream(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,
@@ -221,11 +268,25 @@ async fn stream(
     let bbox_filter: Option<Bbox> = params.bbox.as_deref().and_then(Bbox::parse);
     let alt_min = params.alt_min;
     let alt_max = params.alt_max;
+    let radius_filter: Option<RadiusFilter> =
+        match (params.origin_lat, params.origin_lon, params.max_distance_nm) {
+            (Some(lat), Some(lon), Some(nm))
+                if (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) && nm > 0.0 =>
+            {
+                Some(RadiusFilter {
+                    lat,
+                    lon,
+                    max_nm: nm,
+                })
+            }
+            _ => None,
+        };
     // We need the snapshot inside the filter closure to resolve an
-    // aircraft's current position for bbox/altitude checks on *any*
-    // event type, not just `position`. Clone the Arc once.
+    // aircraft's current position for bbox/altitude/radius checks on
+    // *any* event type, not just `position`. Clone the Arc once.
     let snapshot = state.snapshot.clone();
-    let needs_aircraft_lookup = bbox_filter.is_some() || alt_min.is_some() || alt_max.is_some();
+    let needs_aircraft_lookup =
+        bbox_filter.is_some() || alt_min.is_some() || alt_max.is_some() || radius_filter.is_some();
 
     // Last-Event-ID: the client may include this header to resume from a
     // specific event id after reconnect. Replay any events with id >
@@ -308,6 +369,11 @@ async fn stream(
             let position = aircraft.position.as_ref()?;
             if let Some(bbox) = &bbox_filter {
                 if !bbox.contains(position.lat, position.lon) {
+                    return None;
+                }
+            }
+            if let Some(rf) = &radius_filter {
+                if !rf.contains(position.lat, position.lon) {
                     return None;
                 }
             }
@@ -394,5 +460,38 @@ mod tests {
         assert!(!b.contains(40.5, -74.1));
         assert!(!b.contains(41.1, -73.5));
         assert!(!b.contains(40.5, -72.9));
+    }
+
+    #[test]
+    fn radius_filter_pins_known_distances() {
+        // Origin: Brooklyn (≈ user's antenna). Reference distances
+        // computed via independent great-circle calculator:
+        //   LGA  ~5.4 nm,  JFK ~10 nm,  EWR ~13 nm.
+        // 8 nm radius is comfortably between LGA (in) and JFK (out).
+        let f = RadiusFilter {
+            lat: 40.70214,
+            lon: -73.98262,
+            max_nm: 8.0,
+        };
+        // LGA airport center is ~5.4 nm → inside.
+        assert!(f.contains(40.7769, -73.8740));
+        // JFK is ~10 nm → outside an 8 nm radius.
+        assert!(!f.contains(40.6413, -73.7781));
+        // EWR is ~13 nm away → comfortably outside.
+        assert!(!f.contains(40.6925, -74.1687));
+        // The origin itself is always inside any positive radius.
+        assert!(f.contains(40.70214, -73.98262));
+    }
+
+    #[test]
+    fn radius_filter_zero_radius_is_a_point() {
+        let f = RadiusFilter {
+            lat: 40.7,
+            lon: -74.0,
+            max_nm: 0.0,
+        };
+        // Only the origin itself qualifies (haversine returns ~0).
+        assert!(f.contains(40.7, -74.0));
+        assert!(!f.contains(40.71, -74.0));
     }
 }

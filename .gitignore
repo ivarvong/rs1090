@@ -21,3 +21,12 @@ dhat-heap.json
 # Per-deployment secrets (Pi hostname, user, reference position, etc.)
 # Sourced by dist/deploy.sh; see dist/.env.example for the template.
 dist/.env
+
+# Claude Code session state — local-only.
+.claude/
+
+# Xcode build output, user state, derived data.
+apps/ios/SkyAR/build/
+apps/ios/SkyAR/DerivedData/
+**/*.xcuserstate
+**/xcuserdata/
