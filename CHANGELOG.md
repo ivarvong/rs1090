@@ -45,6 +45,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Explicit CLI flags still win (precedence resolved via clap's
   `ValueSource`). Example file ships at
   `dist/etc/rs1090/serve.toml.example`. Closes #33.
+- **Surface position decoding (TC 5–8)**, the remaining M3 known
+  limitation. New `SurfacePosition` decoded payload carries ground
+  speed (from the non-linear 7-bit MOV field per DO-260B Table 2-58),
+  ground track (when the heading-status bit is set), and the same
+  17+17 CPR fragment airborne uses. The CPR side is decoded against
+  the receiver reference via the new `cpr::local_decode_surface` —
+  surface CPR has a four-quadrant ambiguity that the reference
+  resolves. State tracker turns one TC 5–8 frame into a `Position`
+  event with `source = "surface"` (new `PositionSource::Surface`
+  variant; serialised wire tag `"surface"`) plus a `Velocity` event
+  carrying `VelocityKind::Ground`, since the speed + track fields are
+  reference-free and useful even without a position fix. Pinned by
+  four tests: the movement-bucket boundary table (every documented
+  break), the ME-bit unpacking against a hand-assembled frame, the
+  state-tracker round-trip with a reference (Position + Velocity
+  both fire, altitude is `Unavailable`), and the no-reference case
+  (Velocity fires, Position is correctly suppressed).
 - **SSE replay buffer for `Last-Event-ID` reconnects** (DESIGN
   §12.4). Bounded ring of the last 4096 event envelopes lives in
   `AppState.replay`; the decoder loop pushes each envelope to the
@@ -192,6 +209,8 @@ disagreements on the 2-minute corpus.
 - Surface position (TC 5–8), aircraft status (TC 28), and operational
   status (TC 31) are still surfaced as `Raw` payloads; decoding lands
   in a future milestone alongside Beast/SBS network output formats.
+  (TC 5–8 subsequently landed; see `[Unreleased]`. TC 28 and 31 are
+  still raw.)
 
 ## M4: live RTL-SDR backend
 

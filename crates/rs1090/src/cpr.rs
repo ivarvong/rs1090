@@ -339,7 +339,31 @@ pub fn global_decode(
 /// location).
 #[must_use]
 pub fn local_decode(msg: CprPosition, reference: LatLon) -> LatLon {
-    let dlat = d_lat(msg.odd);
+    local_decode_with_dlat(msg, reference, d_lat(msg.odd))
+}
+
+/// Surface-position counterpart to [`local_decode`]. Surface ADS-B
+/// messages encode lat/lon with a four-times-finer quantization
+/// (`Dlat_surface = Dlat_airborne / 4`) and the encoding wraps every
+/// 90° rather than every 360°, so the absolute position has a
+/// four-quadrant ambiguity. The reference resolves it: as long as it's
+/// within 45° of the aircraft (essentially always, for any practical
+/// ground-station deployment), the local-decode arithmetic snaps to
+/// the right quadrant.
+///
+/// # Errors
+///
+/// This function returns the decoded position even when the reference
+/// is far enough that the wrong quadrant is selected; like
+/// [`local_decode`], the failure mode is silent and the caller is
+/// responsible for only invoking it with a reasonable reference (the
+/// state tracker feeds in the configured receiver location).
+#[must_use]
+pub fn local_decode_surface(msg: CprPosition, reference: LatLon) -> LatLon {
+    local_decode_with_dlat(msg, reference, d_lat(msg.odd) / 4.0)
+}
+
+fn local_decode_with_dlat(msg: CprPosition, reference: LatLon, dlat: f64) -> LatLon {
     let yz = msg.lat_frac();
     let j = cpr_floor(reference.lat_deg / dlat)
         + cpr_floor(0.5 + cpr_mod(reference.lat_deg, dlat) / dlat - yz);
@@ -347,7 +371,8 @@ pub fn local_decode(msg: CprPosition, reference: LatLon) -> LatLon {
     let lat = wrap_lat(lat);
 
     let nl_lat = nl(lat);
-    let dlon = d_lon(nl_lat, msg.odd);
+    // Surface scales d_lon by the same factor d_lat is scaled by.
+    let dlon = d_lon(nl_lat, msg.odd) * (dlat / d_lat(msg.odd));
     let xz = msg.lon_frac();
     let m = cpr_floor(reference.lon_deg / dlon)
         + cpr_floor(0.5 + cpr_mod(reference.lon_deg, dlon) / dlon - xz);

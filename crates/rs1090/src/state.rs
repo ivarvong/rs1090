@@ -106,6 +106,11 @@ pub enum PositionSource {
     Global,
     /// Local CPR decode against a prior known position.
     Local,
+    /// Surface CPR decode (TC 5–8). Surface positions always require
+    /// a receiver reference; we tag them distinctly from `Local` so
+    /// consumers can tell airborne-local fixes (the local-CPR
+    /// fallback) apart from surface fixes (taxiing aircraft).
+    Surface,
 }
 
 impl PositionSource {
@@ -120,6 +125,7 @@ impl PositionSource {
         match self {
             Self::Global => "global",
             Self::Local => "local",
+            Self::Surface => "surface",
         }
     }
 }
@@ -454,6 +460,9 @@ fn apply_extended_squitter(
             // recent message — which matches what consumers want.
             try_resolve_position(aircraft, at, p.altitude, reference, out);
         }
+        SquitterPayload::SurfacePosition(p) => {
+            try_resolve_surface(aircraft, at, *p, reference, out);
+        }
         SquitterPayload::Velocity(v) => {
             aircraft.velocity = Some(*v);
             out.push(StateEvent::Velocity {
@@ -546,6 +555,67 @@ fn try_resolve_position(
     });
 }
 
+/// Handle a surface-position (TC 5–8) ingest.
+///
+/// Surface CPR is intrinsically reference-dependent — the encoding wraps
+/// every 90° and the receiver location is what tells us which quadrant
+/// the aircraft is in. With no reference set, we can extract the
+/// movement and track fields but can't resolve lat/lon, so we emit a
+/// Velocity event for what's knowable and drop the CPR fragment on the
+/// floor.
+fn try_resolve_surface(
+    aircraft: &mut Aircraft,
+    at: Instant,
+    p: message::SurfacePosition,
+    reference: Option<LatLon>,
+    out: &mut Vec<StateEvent>,
+) {
+    use message::{VelocityKind, VerticalRateSource};
+
+    // Always emit the velocity half: ground speed + track come straight
+    // out of the message bits, no reference needed. The state tracker's
+    // velocity slot is shared with airborne velocity events, which is
+    // exactly the right thing — a taxiing aircraft has the same kind of
+    // ground-frame velocity an aircraft on rollout does.
+    if p.ground_speed_kt.is_some() || p.track_deg.is_some() {
+        let velocity = Velocity {
+            kind: VelocityKind::Ground {
+                // Convert f32 kt → u16 kt; the underlying field is
+                // 0..=175 so this never truncates meaningful data.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                speed_kt: p.ground_speed_kt.map_or(0, |s| s.round() as u16),
+                heading_deg: p.track_deg.unwrap_or(0.0),
+            },
+            // Surface aircraft don't broadcast vertical rate; they're
+            // on the ground.
+            vertical_rate_fpm: None,
+            vertical_rate_source: VerticalRateSource::Baro,
+        };
+        aircraft.velocity = Some(velocity);
+        out.push(StateEvent::Velocity {
+            icao: aircraft.icao,
+            velocity,
+        });
+    }
+
+    // Position needs the reference.
+    let Some(ref_pos) = reference else { return };
+    let pos = cpr::local_decode_surface(p.cpr, ref_pos);
+    let altitude = Altitude::Unavailable;
+    aircraft.position = Some(TimedPosition {
+        at,
+        pos,
+        altitude,
+        source: PositionSource::Surface,
+    });
+    out.push(StateEvent::Position {
+        icao: aircraft.icao,
+        pos,
+        altitude,
+        source: PositionSource::Surface,
+    });
+}
+
 // --- Tests ------------------------------------------------------------------
 
 #[cfg(test)]
@@ -633,6 +703,39 @@ mod tests {
         for (i, byte) in me.iter_mut().enumerate() {
             *byte = ((me_bits >> (8 * (6 - i))) & 0xFF) as u8;
         }
+        me
+    }
+
+    /// Build a TC=7 surface-position ME from the field set the ME
+    /// layout exposes. `movement` is the raw 7-bit MOV (see
+    /// `surface_speed_kt` in message.rs for the bucket table);
+    /// `heading_raw` is the 7-bit ground track LSB = 360/128°.
+    fn surface_position_me(
+        movement: u8,
+        heading_valid: bool,
+        heading_raw: u8,
+        odd: bool,
+        lat_cpr: u32,
+        lon_cpr: u32,
+    ) -> [u8; 7] {
+        let mut me = [0u8; 7];
+        let mut put = |pos: usize, val: u32, len: u8| {
+            for i in 0..len {
+                let bit = (val >> (u32::from(len) - 1 - u32::from(i))) & 1;
+                let me_pos = pos + usize::from(i);
+                let byte = (me_pos - 1) / 8;
+                let off = 7 - ((me_pos - 1) % 8);
+                me[byte] |= u8::try_from(bit).unwrap() << off;
+            }
+        };
+        put(1, 7, 5); // TC = 7 (surface position, NUCp = 7)
+        put(6, u32::from(movement), 7);
+        put(13, u32::from(heading_valid), 1);
+        put(14, u32::from(heading_raw), 7);
+        // bit 21 (T) left zero.
+        put(22, u32::from(odd), 1);
+        put(23, lat_cpr & 0x1_FFFF, 17);
+        put(40, lon_cpr & 0x1_FFFF, 17);
         me
     }
 
@@ -844,6 +947,77 @@ mod tests {
             "f1 should survive — it was touched"
         );
         assert!(tracker.get(icao2).is_none(), "f2 should be gone");
+    }
+
+    #[test]
+    fn surface_position_with_reference_emits_position_and_velocity() {
+        // TC=7 surface frame: MOV=39 → 15 kt, heading valid, track 32 → 90°,
+        // CPR fields arbitrary (the position-decode round-trip is exercised
+        // by the cpr-module tests; here we only assert the wire-through).
+        let me = surface_position_me(39, true, 32, false, 17_476, 2920);
+        let frame = frame_from_bytes(&build_df17([0x4B, 0x9C, 0xA2], me));
+
+        let mut tracker = StateTracker::new();
+        tracker.set_reference(LatLon {
+            lat_deg: 40.7,
+            lon_deg: -74.0,
+        });
+        let mut events = Vec::new();
+        tracker.ingest(&frame, Instant::now(), &mut events);
+
+        let icao = Icao::from_bytes([0x4B, 0x9C, 0xA2]);
+        let pos = events.iter().find_map(|e| match e {
+            StateEvent::Position {
+                icao: i,
+                source,
+                altitude,
+                ..
+            } if *i == icao => Some((*source, *altitude)),
+            _ => None,
+        });
+        let (source, altitude) = pos.expect("surface position should emit a Position event");
+        assert_eq!(source, PositionSource::Surface);
+        // Surface aircraft don't broadcast altitude.
+        assert!(matches!(altitude, Altitude::Unavailable));
+
+        let vel = events.iter().find_map(|e| match e {
+            StateEvent::Velocity {
+                icao: i, velocity, ..
+            } if *i == icao => Some(*velocity),
+            _ => None,
+        });
+        let v = vel.expect("surface position should emit a Velocity event");
+        let crate::message::VelocityKind::Ground {
+            speed_kt,
+            heading_deg,
+        } = v.kind
+        else {
+            panic!("expected ground velocity, got {:?}", v.kind);
+        };
+        assert_eq!(speed_kt, 15);
+        assert!((heading_deg - 90.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn surface_position_without_reference_emits_velocity_only() {
+        // Same frame as above, but with no receiver reference set: the
+        // velocity half is reference-free so it still fires; the position
+        // half would require a reference to disambiguate the CPR quadrant
+        // and gets dropped on the floor instead of producing a garbage
+        // fix.
+        let me = surface_position_me(39, true, 32, false, 17_476, 2920);
+        let frame = frame_from_bytes(&build_df17([0x4B, 0x9C, 0xA2], me));
+
+        let mut tracker = StateTracker::new();
+        let mut events = Vec::new();
+        tracker.ingest(&frame, Instant::now(), &mut events);
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StateEvent::Velocity { .. })));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, StateEvent::Position { .. })));
     }
 
     #[test]

@@ -138,8 +138,11 @@ impl core::fmt::Display for Icao {
 pub enum TypeCode {
     /// TC 1–4: aircraft identification and category.
     Identification,
-    /// TC 5–8: surface position (not decoded in v0.1; surface CPR uses a
-    /// different quantization and an external reference).
+    /// TC 5–8: surface position. The bit layout differs from airborne
+    /// position — ground speed + track in place of altitude — and the
+    /// CPR encoding uses a four-times-finer quantization with a
+    /// four-quadrant globe ambiguity that the receiver reference
+    /// resolves. See [`SurfacePosition`].
     SurfacePosition,
     /// TC 9–18, 20–22: airborne position. Includes altitude (baro for 9–18,
     /// GNSS for 20–22) and the 17+17 CPR lat/lon.
@@ -250,6 +253,24 @@ pub struct AirbornePosition {
     pub cpr: CprPosition,
 }
 
+/// Surface position (TC 5–8). Surface ADS-B messages carry the same
+/// 17+17-bit CPR pair as airborne, plus ground speed and track in
+/// place of the airborne altitude. Surface CPR uses a different
+/// quantization than airborne (`Dlat_surface = Dlat_airborne / 4`)
+/// and a four-quadrant globe ambiguity that's resolved by a receiver
+/// reference — see [`crate::cpr::local_decode_surface`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfacePosition {
+    /// Ground speed in knots, or `None` if the aircraft is reporting
+    /// "no information" (`mov = 0`) or the reserved range (125–127).
+    /// `mov = 1` ("stopped" — under 0.125 kt) decodes to `Some(0.0)`.
+    pub ground_speed_kt: Option<f32>,
+    /// Ground track in degrees clockwise from true north, or `None`
+    /// when the message's heading-status bit is clear.
+    pub track_deg: Option<f32>,
+    pub cpr: CprPosition,
+}
+
 /// Airborne velocity (TC 19), with the subtype-specific encoding flattened
 /// into one struct. Heading is degrees-true clockwise from north; vertical
 /// rate is feet per minute with positive = climb.
@@ -317,6 +338,7 @@ pub struct ExtendedSquitter {
 pub enum SquitterPayload {
     Identification(Identification),
     AirbornePosition(AirbornePosition),
+    SurfacePosition(SurfacePosition),
     Velocity(Velocity),
     /// TC handled by dispatch but not yet decoded into a typed field.
     /// The 7-byte raw ME is preserved.
@@ -391,6 +413,7 @@ fn decode_extended_squitter(bytes: &[u8]) -> ExtendedSquitter {
         TypeCode::AirbornePosition => {
             SquitterPayload::AirbornePosition(decode_airborne_position(me))
         }
+        TypeCode::SurfacePosition => SquitterPayload::SurfacePosition(decode_surface_position(me)),
         TypeCode::Velocity => {
             decode_velocity(me).map_or(SquitterPayload::Raw(me), SquitterPayload::Velocity)
         }
@@ -550,6 +573,79 @@ fn decode_airborne_position(me: [u8; 7]) -> AirbornePosition {
             lon_cpr,
             odd: f_flag,
         },
+    }
+}
+
+// --- Surface position -------------------------------------------------------
+
+fn decode_surface_position(me: [u8; 7]) -> SurfacePosition {
+    // ME bit layout per DO-260B Table 2-58 (1-indexed MSB-first):
+    //   bits  1..=5  : TC (5-8)
+    //   bits  6..=12 : MOV (movement field — see `surface_speed_kt`)
+    //   bit  13      : heading-status flag (1 = ground track valid)
+    //   bits 14..=20 : ground track (7 bits, LSB = 360/128 deg)
+    //   bit  21      : T (UTC-aligned timestamp flag; not exposed)
+    //   bit  22      : F (CPR even/odd)
+    //   bits 23..=39 : lat_cpr (17 bits)
+    //   bits 40..=56 : lon_cpr (17 bits)
+    let r = BitReader::new(&me);
+    #[allow(clippy::cast_possible_truncation)]
+    let movement = r.bits(6, 7) as u8;
+    let heading_valid = r.bit(13);
+    #[allow(clippy::cast_possible_truncation)]
+    let heading_raw = r.bits(14, 7) as u8;
+    let f_flag = r.bit(22);
+    let lat_cpr = r.bits(23, 17);
+    let lon_cpr = r.bits(40, 17);
+
+    let track_deg = if heading_valid {
+        // 7-bit unsigned * (360 / 128); LSB ≈ 2.81°.
+        Some(f32::from(heading_raw) * (360.0 / 128.0))
+    } else {
+        None
+    };
+
+    SurfacePosition {
+        ground_speed_kt: surface_speed_kt(movement),
+        track_deg,
+        cpr: CprPosition {
+            lat_cpr,
+            lon_cpr,
+            odd: f_flag,
+        },
+    }
+}
+
+/// Decode the non-linear movement field (TC 5–8 ME bits 6..=12) into a
+/// ground speed in knots. The buckets come straight from DO-260B
+/// Table 2-58 and match `pyModeS.commb.movement` exactly:
+///
+/// | raw          | speed                          |
+/// |--------------|--------------------------------|
+/// | 0            | no information → `None`        |
+/// | 1            | stopped (< 0.125 kt) → 0.0     |
+/// | 2..=8        | 0.125 + (raw − 2) × 0.125 kt   |
+/// | 9..=12       | 1 + (raw − 9) × 0.25 kt        |
+/// | 13..=38      | 2 + (raw − 13) × 0.5 kt        |
+/// | 39..=93      | 15 + (raw − 39) × 1 kt         |
+/// | 94..=108     | 70 + (raw − 94) × 2 kt         |
+/// | 109..=123    | 100 + (raw − 109) × 5 kt       |
+/// | 124          | ≥ 175 kt → 175.0               |
+/// | 125..=127    | reserved → `None`              |
+#[must_use]
+pub fn surface_speed_kt(movement: u8) -> Option<f32> {
+    // 0 (no info) and 125..=127 (reserved) both collapse to None via
+    // the trailing wildcard; explicit None arms would be repeated.
+    match movement {
+        1 => Some(0.0),
+        2..=8 => Some(0.125 + f32::from(movement - 2) * 0.125),
+        9..=12 => Some(1.0 + f32::from(movement - 9) * 0.25),
+        13..=38 => Some(2.0 + f32::from(movement - 13) * 0.5),
+        39..=93 => Some(15.0 + f32::from(movement - 39)),
+        94..=108 => Some(70.0 + f32::from(movement - 94) * 2.0),
+        109..=123 => Some(100.0 + f32::from(movement - 109) * 5.0),
+        124 => Some(175.0),
+        _ => None,
     }
 }
 
@@ -1011,6 +1107,64 @@ mod tests {
         let r = BitReader::new(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00]);
         assert_eq!(r.bits(1, 32), 0xDEAD_BEEF);
         assert_eq!(r.bits(9, 32), 0xADBE_EF00);
+    }
+
+    #[test]
+    fn surface_speed_table_at_bucket_boundaries() {
+        // Exhaustively pin every documented boundary of the non-linear
+        // movement field. Catches off-by-one regressions in any single
+        // bucket without enumerating all 128 raw values.
+        assert_eq!(surface_speed_kt(0), None);
+        assert_eq!(surface_speed_kt(1), Some(0.0));
+        assert_eq!(surface_speed_kt(2), Some(0.125));
+        assert_eq!(surface_speed_kt(8), Some(0.875));
+        assert_eq!(surface_speed_kt(9), Some(1.0));
+        assert_eq!(surface_speed_kt(12), Some(1.75));
+        assert_eq!(surface_speed_kt(13), Some(2.0));
+        assert_eq!(surface_speed_kt(38), Some(14.5));
+        assert_eq!(surface_speed_kt(39), Some(15.0));
+        assert_eq!(surface_speed_kt(93), Some(69.0));
+        assert_eq!(surface_speed_kt(94), Some(70.0));
+        assert_eq!(surface_speed_kt(108), Some(98.0));
+        assert_eq!(surface_speed_kt(109), Some(100.0));
+        assert_eq!(surface_speed_kt(123), Some(170.0));
+        assert_eq!(surface_speed_kt(124), Some(175.0));
+        // Reserved range.
+        assert_eq!(surface_speed_kt(125), None);
+        assert_eq!(surface_speed_kt(127), None);
+    }
+
+    #[test]
+    fn surface_position_unpacks_me_bits() {
+        // Hand-assemble a TC=7 surface ME and verify every field comes
+        // back out the same value. The packing matches DO-260B §2.2.3.2.5:
+        //   TC=7, MOV=39 (= 15 kt), heading_valid=1, heading_raw=32
+        //   (= 32 × 360/128 = 90.0°), F=0 (even), lat_cpr=0x1FFFF (all 1s,
+        //   17 bits), lon_cpr=0x10000 (top bit only).
+        let mut me = [0u8; 7];
+        let put = |me: &mut [u8; 7], pos: usize, val: u32, len: u8| {
+            for i in 0..len {
+                let bit = (val >> (u32::from(len) - 1 - u32::from(i))) & 1;
+                let me_pos = pos + usize::from(i); // 1-indexed
+                let byte = (me_pos - 1) / 8;
+                let off = 7 - ((me_pos - 1) % 8);
+                me[byte] |= u8::try_from(bit).unwrap() << off;
+            }
+        };
+        put(&mut me, 1, 7, 5); // TC
+        put(&mut me, 6, 39, 7); // MOV
+        put(&mut me, 13, 1, 1); // heading valid
+        put(&mut me, 14, 32, 7); // heading raw → 90°
+                                 // bit 21 (T), bit 22 (F) left zero.
+        put(&mut me, 23, 0x1_FFFF, 17); // lat_cpr
+        put(&mut me, 40, 0x1_0000, 17); // lon_cpr
+
+        let p = decode_surface_position(me);
+        assert_eq!(p.ground_speed_kt, Some(15.0));
+        assert!((p.track_deg.unwrap() - 90.0).abs() < 1e-3);
+        assert!(!p.cpr.odd);
+        assert_eq!(p.cpr.lat_cpr, 0x1_FFFF);
+        assert_eq!(p.cpr.lon_cpr, 0x1_0000);
     }
 
     #[test]
