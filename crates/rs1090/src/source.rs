@@ -37,30 +37,69 @@ pub trait SampleSource {
     fn read(&mut self, out: &mut [Iq]) -> io::Result<usize>;
 }
 
-/// Replay a file of interleaved signed-8-bit I/Q samples.
+/// On-disk sample format for [`IqFileSource`].
 ///
-/// File layout: `i0 q0 i1 q1 i2 q2 ...`, each byte interpreted as `i8`.
-/// This is the canonical post-bias-subtraction RTL-SDR format. The file's
-/// sample rate and center frequency are not embedded in the format itself,
-/// so the caller supplies them.
+/// Two formats are widely used in the ADS-B / RTL-SDR ecosystem:
+///
+/// - **S8**: signed 8-bit, range `[-128, 127]`, centered at 0. This is
+///   the post-bias-subtraction format rs1090 produces with `live
+///   --record` and what the rest of the pipeline assumes natively.
+/// - **UC8**: unsigned 8-bit, range `[0, 255]`, centered at 128 (the
+///   DC bias the RTL-SDR's ADC adds). This is what stock tools like
+///   `rtl_sdr`, `rtl_test`, and `dump1090 --iformat UC8` produce, so
+///   it's the right choice when bringing in third-party captures
+///   for differential testing.
+///
+/// Conversion between the two is a per-byte `wrapping_sub(128)`; there
+/// is no loss of precision in either direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SampleFormat {
+    /// Signed 8-bit (rs1090's native, what `live --record` writes).
+    #[default]
+    S8,
+    /// Unsigned 8-bit centered at 128 (rtl_sdr / dump1090 native).
+    Uc8,
+}
+
+/// Replay a file of interleaved 8-bit I/Q samples.
+///
+/// File layout: `i0 q0 i1 q1 i2 q2 ...`, each byte interpreted per the
+/// configured [`SampleFormat`]. The file's sample rate, center
+/// frequency, and format are not embedded in the format itself, so
+/// the caller supplies them.
 #[derive(Debug)]
 pub struct IqFileSource<R: Read> {
     reader: R,
     sample_rate: u32,
     center_freq: u32,
+    format: SampleFormat,
     /// Scratch buffer for byte-level reads. Sized to one cache line per
     /// sample pair.
     byte_buf: [u8; 4096],
 }
 
 impl<R: Read> IqFileSource<R> {
-    /// Wrap a reader. Caller is responsible for supplying the sample rate
-    /// and center frequency that match the file's contents.
+    /// Wrap a reader using the default S8 sample format. Caller is
+    /// responsible for supplying the sample rate and center frequency
+    /// that match the file's contents.
     pub fn new(reader: R, sample_rate: u32, center_freq: u32) -> Self {
+        Self::with_format(reader, sample_rate, center_freq, SampleFormat::S8)
+    }
+
+    /// Wrap a reader with an explicit sample format. Use this when
+    /// replaying captures produced by stock tools like `rtl_sdr`
+    /// (which writes UC8) rather than rs1090's own `live --record`.
+    pub fn with_format(
+        reader: R,
+        sample_rate: u32,
+        center_freq: u32,
+        format: SampleFormat,
+    ) -> Self {
         Self {
             reader,
             sample_rate,
             center_freq,
+            format,
             byte_buf: [0; 4096],
         }
     }
@@ -101,14 +140,24 @@ impl<R: Read> SampleSource for IqFileSource<R> {
         // EOF, drop it on the floor (the caller can detect EOF on a future
         // read returning 0).
         let pairs = got / 2;
-        // The cast from u8 to i8 is the explicit intent of the file format:
-        // raw bytes are signed 8-bit samples after the receiver's bias
-        // subtraction. We use `i8::from_ne_bytes` so the conversion is
-        // documented rather than a lint-suppressed `as`.
-        for (k, slot) in out.iter_mut().enumerate().take(pairs) {
-            let i = i8::from_ne_bytes([self.byte_buf[k * 2]]);
-            let q = i8::from_ne_bytes([self.byte_buf[k * 2 + 1]]);
-            *slot = Iq::new(i, q);
+        // S8 is a direct reinterpret; UC8 subtracts the 128 DC bias.
+        // Both routes use `i8::from_ne_bytes`/`wrapping_sub` to keep the
+        // u8→i8 mapping explicit rather than a lint-suppressed `as`.
+        match self.format {
+            SampleFormat::S8 => {
+                for (k, slot) in out.iter_mut().enumerate().take(pairs) {
+                    let i = i8::from_ne_bytes([self.byte_buf[k * 2]]);
+                    let q = i8::from_ne_bytes([self.byte_buf[k * 2 + 1]]);
+                    *slot = Iq::new(i, q);
+                }
+            }
+            SampleFormat::Uc8 => {
+                for (k, slot) in out.iter_mut().enumerate().take(pairs) {
+                    let i = i8::from_ne_bytes([self.byte_buf[k * 2].wrapping_sub(128)]);
+                    let q = i8::from_ne_bytes([self.byte_buf[k * 2 + 1].wrapping_sub(128)]);
+                    *slot = Iq::new(i, q);
+                }
+            }
         }
         Ok(pairs)
     }
@@ -132,6 +181,22 @@ mod tests {
         // Subsequent read sees EOF.
         let n = src.read(&mut out).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn file_source_reads_uc8_samples() {
+        // UC8 is unsigned, biased at 128. Decoding subtracts 128:
+        //   uc8 byte 128 → i8 0     (DC zero)
+        //   uc8 byte 0   → i8 -128  (most negative)
+        //   uc8 byte 255 → i8 127   (most positive)
+        //   uc8 byte 129 → i8 1
+        let bytes: &[u8] = &[128, 129, 0, 255];
+        let mut src = IqFileSource::with_format(bytes, 2_000_000, 1_090_000_000, SampleFormat::Uc8);
+        let mut out = [Iq::default(); 4];
+        let n = src.read(&mut out).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(out[0], Iq::new(0, 1));
+        assert_eq!(out[1], Iq::new(-128, 127));
     }
 
     #[test]

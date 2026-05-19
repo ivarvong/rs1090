@@ -33,8 +33,8 @@
 
 use crate::crc::{self, CrcOutcome, LONG_FRAME_BYTES, SHORT_FRAME_BYTES};
 use crate::demod::{
-    aggregate_confidence, pack_bits_msb, preamble_clears_threshold, preamble_score, slice_bits,
-    NoiseFloor, PREAMBLE_SAMPLES, SAMPLES_PER_BIT,
+    aggregate_confidence, pack_bits_msb, preamble_clears_threshold, preamble_score_cfg,
+    slice_bits_cfg, DemodConfig, NoiseFloor,
 };
 use crate::magnitude;
 use crate::Iq;
@@ -259,14 +259,21 @@ impl Frame {
 #[derive(Debug)]
 pub struct FrameDetector {
     floor: NoiseFloor,
+    /// Per-sample-rate constants (samples per bit, preamble shape, …).
+    /// Construction-time choice; the bit slicer's offsets are derived
+    /// from this on every frame so all the rate-dependent math lives in
+    /// one place.
+    cfg: DemodConfig,
     /// Configuration: minimum aggregate confidence for a frame to be
     /// surfaced. Frames below this are dropped silently. `0` means "accept
     /// everything that passes CRC".
     min_confidence: u8,
-    /// Pending samples carried over from the previous chunk. We need
-    /// enough to cover a preamble plus the longest frame: 16 +
-    /// 14 * 8 * 2 = 240 samples. We keep a power-of-two-ish margin.
-    carry: [u16; CARRY_SAMPLES],
+    /// Pending samples carried over from the previous chunk. Sized in
+    /// the constructor based on the configured sample rate — at 2 MS/s
+    /// a preamble + long frame is ~240 samples; at 2.4 MS/s it's ~288.
+    /// We round up to a comfortable margin and reuse the same backing
+    /// array across calls.
+    carry: alloc::vec::Vec<u16>,
     carry_len: usize,
     /// Magnitude buffer reused across every `process` call. Pre-sized in
     /// the constructor so the steady-state hot path makes zero
@@ -276,9 +283,14 @@ pub struct FrameDetector {
     mag_buf: alloc::vec::Vec<u16>,
 }
 
-/// Samples we keep across `process` calls. A preamble plus a long frame is
-/// 16 + 224 = 240 samples; round up to 256 for clean indexing.
-const CARRY_SAMPLES: usize = 256;
+/// Worst-case carry-over (samples) at the given sample rate: one preamble
+/// plus a full long frame. At 2 MS/s: 16 + 224 = 240. At 2.4 MS/s:
+/// 19 + 269 = 288. We pad up to the next 64-sample boundary for clean
+/// indexing.
+fn carry_samples_for(cfg: &DemodConfig) -> usize {
+    let raw = cfg.preamble_samples + cfg.samples_for_bits(LONG_FRAME_BITS);
+    raw.div_ceil(64) * 64
+}
 
 /// Default magnitude-buffer reserve sized for the chunk shapes the live
 /// SDR pipeline typically delivers: 32 KiB USB transfers at 2 MS/s →
@@ -293,12 +305,6 @@ const LONG_FRAME_BITS: usize = LONG_FRAME_BYTES * 8;
 /// Bits per short frame.
 const SHORT_FRAME_BITS: usize = SHORT_FRAME_BYTES * 8;
 
-/// Samples covering preamble + at least a short payload. This is the minimum
-/// we need to even *try* to read a preamble plus its 5-bit DF prefix; if the
-/// DF resolves to a long frame and we don't have enough buffer, we break out
-/// and the carry-over picks up the trail on the next call.
-const MIN_DETECTION_WINDOW: usize = PREAMBLE_SAMPLES + SHORT_FRAME_BITS * SAMPLES_PER_BIT;
-
 impl Default for FrameDetector {
     fn default() -> Self {
         Self::new()
@@ -306,9 +312,21 @@ impl Default for FrameDetector {
 }
 
 impl FrameDetector {
+    /// Detector tuned for the canonical 2 MS/s rate. Same as
+    /// [`Self::with_sample_rate`] called with `2_000_000`.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_chunk_capacity(DEFAULT_CHUNK_SAMPLES)
+        Self::with_sample_rate(2_000_000)
+    }
+
+    /// Detector tuned for the given sample rate (Hz). All bit-position
+    /// math (preamble correlator, slicer, scratch buffer sizes) is
+    /// derived from this; pass the rate your `SampleSource` actually
+    /// produces. Currently validated at 2 MS/s (rs1090 native) and
+    /// 2.4 MS/s (dump1090 native).
+    #[must_use]
+    pub fn with_sample_rate(sample_rate: u32) -> Self {
+        Self::with_chunk_capacity_and_rate(DEFAULT_CHUNK_SAMPLES, sample_rate)
     }
 
     /// Construct with the magnitude buffer pre-sized for `chunk_samples`
@@ -318,12 +336,22 @@ impl FrameDetector {
     /// strict "no allocations after construction" behaviour.
     #[must_use]
     pub fn with_chunk_capacity(chunk_samples: usize) -> Self {
+        Self::with_chunk_capacity_and_rate(chunk_samples, 2_000_000)
+    }
+
+    /// Most general constructor: explicit chunk size *and* sample rate.
+    #[must_use]
+    pub fn with_chunk_capacity_and_rate(chunk_samples: usize, sample_rate: u32) -> Self {
+        let cfg = DemodConfig::for_sample_rate(sample_rate);
+        let carry_capacity = carry_samples_for(&cfg);
+        let carry = alloc::vec![0u16; carry_capacity];
         Self {
             floor: NoiseFloor::fresh(),
             min_confidence: 0,
-            carry: [0; CARRY_SAMPLES],
+            carry,
             carry_len: 0,
-            mag_buf: alloc::vec::Vec::with_capacity(chunk_samples + CARRY_SAMPLES),
+            mag_buf: alloc::vec::Vec::with_capacity(chunk_samples + carry_capacity),
+            cfg,
         }
     }
 
@@ -375,18 +403,20 @@ impl FrameDetector {
         let mut conf = [0u8; LONG_FRAME_BITS];
         let mut bytes = [0u8; MAX_FRAME_BYTES];
 
-        while i + MIN_DETECTION_WINDOW <= n {
+        // Per-rate sliding-window minimum: preamble + short-frame payload.
+        let cfg = &self.cfg;
+        let min_detection_window = cfg.preamble_samples + cfg.samples_for_bits(SHORT_FRAME_BITS);
+        let df_prefix_samples = cfg.samples_for_bits(5);
+
+        while i + min_detection_window <= n {
             // Update floor with one sample of look-back. We update with the
             // current sample so that the threshold reflects the local
             // baseline at the candidate position.
             let floor = self.floor.update(buf[i]);
 
             // 2a. Score the preamble window.
-            // SAFETY: bounds checked by the loop condition.
-            let window: &[u16; PREAMBLE_SAMPLES] = (&buf[i..i + PREAMBLE_SAMPLES])
-                .try_into()
-                .expect("slice has correct length by construction");
-            let score = preamble_score(window);
+            let window = &buf[i..i + cfg.preamble_samples];
+            let score = preamble_score_cfg(cfg, window);
             if !preamble_clears_threshold(score, floor) {
                 i += 1;
                 continue;
@@ -394,20 +424,20 @@ impl FrameDetector {
 
             // 2b. Preamble candidate. Slice the first 5 bits to read DF.
             //     The payload starts immediately after the preamble.
-            let payload_start = i + PREAMBLE_SAMPLES;
-            let df_samples = &buf[payload_start..payload_start + 5 * SAMPLES_PER_BIT];
-            let (df_byte_high, df_conf_high) = slice_df_prefix(df_samples);
+            let payload_start = i + cfg.preamble_samples;
+            let df_samples = &buf[payload_start..payload_start + df_prefix_samples];
+            let (df_byte_high, df_conf_high) = slice_df_prefix(cfg, df_samples);
             let df = DownlinkFormat::from_first_byte(df_byte_high);
 
             // 2c. Drop reserved DFs immediately; advance past the preamble.
             if matches!(df, DownlinkFormat::Reserved(_)) {
-                i += PREAMBLE_SAMPLES;
+                i += cfg.preamble_samples;
                 continue;
             }
 
             let frame_bytes = df.frame_bytes();
             let frame_bits = frame_bytes * 8;
-            let payload_samples = frame_bits * SAMPLES_PER_BIT;
+            let payload_samples = cfg.samples_for_bits(frame_bits);
             if payload_start + payload_samples > n {
                 // Not enough samples yet; bail out and let the next chunk
                 // pick up the trail.
@@ -415,7 +445,8 @@ impl FrameDetector {
             }
 
             // 2d. Slice the whole frame.
-            slice_bits(
+            slice_bits_cfg(
+                cfg,
                 &buf[payload_start..payload_start + payload_samples],
                 &mut bits[..frame_bits],
                 &mut conf[..frame_bits],
@@ -457,24 +488,32 @@ impl FrameDetector {
         // 3. Stash the trailing window we couldn't fully consume.
         //    Worst case: we need to retain everything from the last
         //    unattempted preamble position to the end. Keep up to
-        //    CARRY_SAMPLES of the tail.
+        //    `carry.capacity()` of the tail.
         let tail_start = i.saturating_sub(0);
         let tail_len = n - tail_start;
-        let retain = tail_len.min(CARRY_SAMPLES);
+        let retain = tail_len.min(self.carry.len());
         let copy_from = n - retain;
         self.carry[..retain].copy_from_slice(&buf[copy_from..n]);
         self.carry_len = retain;
     }
+
+    /// Sample rate this detector was built for. Useful for callers that
+    /// want to assert the source matches.
+    #[must_use]
+    pub fn sample_rate(&self) -> u32 {
+        self.cfg.sample_rate
+    }
 }
 
-/// Decode the first byte of the frame (5-bit DF + 3 bits) given 10 magnitude
-/// samples. Returns the byte and the min confidence of the 5 DF bits (the
-/// other 3 bits are spec'd as message-specific and aren't needed yet).
-fn slice_df_prefix(samples: &[u16]) -> (u8, u8) {
-    debug_assert_eq!(samples.len(), 5 * SAMPLES_PER_BIT);
+/// Decode the first byte of the frame (5-bit DF + 3 bits) given the
+/// magnitude samples for the first 5 bits at the configured rate.
+/// Returns the byte and the min confidence of the 5 DF bits (the other
+/// 3 bits are spec'd as message-specific and aren't needed yet).
+fn slice_df_prefix(cfg: &DemodConfig, samples: &[u16]) -> (u8, u8) {
+    debug_assert_eq!(samples.len(), cfg.samples_for_bits(5));
     let mut bits = [false; 5];
     let mut conf = [0u8; 5];
-    slice_bits(samples, &mut bits, &mut conf);
+    slice_bits_cfg(cfg, samples, &mut bits, &mut conf);
     let mut byte = 0u8;
     for (k, &b) in bits.iter().enumerate() {
         if b {
@@ -495,7 +534,9 @@ extern crate alloc;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::demod::{synth_bits_as_magnitude, PREAMBLE_HIGH_IDX};
+    use crate::demod::{
+        synth_bits_as_magnitude, PREAMBLE_HIGH_IDX, PREAMBLE_SAMPLES, SAMPLES_PER_BIT,
+    };
 
     #[test]
     fn downlink_format_from_byte_picks_known_codes() {
@@ -758,11 +799,12 @@ mod tests {
         // on every SDR chunk.
         let chunk = 1024;
         let mut det = FrameDetector::with_chunk_capacity(chunk);
+        let carry_cap = det.carry.len();
         let initial_cap = det.mag_buf.capacity();
         assert!(
-            initial_cap >= chunk + CARRY_SAMPLES,
+            initial_cap >= chunk + carry_cap,
             "constructor should pre-allocate (got {initial_cap}, want >= {})",
-            chunk + CARRY_SAMPLES,
+            chunk + carry_cap,
         );
         let samples = vec![Iq::new(0, 0); chunk];
         for _ in 0..32 {

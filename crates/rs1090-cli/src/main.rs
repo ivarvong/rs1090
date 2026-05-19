@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 use rs1090::cpr::LatLon;
 use rs1090::frame::{Frame, FrameDetector};
 use rs1090::message::{self, Altitude, Message, SquitterPayload, Velocity, VelocityKind};
-use rs1090::source::{IqFileSource, SampleSource};
+use rs1090::source::{IqFileSource, SampleFormat, SampleSource};
 use rs1090::state::{StateEvent, StateTracker};
 use rs1090::Iq;
 
@@ -76,6 +76,29 @@ struct ReplayArgs {
     /// positives.
     #[arg(long)]
     timestamps: bool,
+
+    /// On-disk sample format for the input file. `s8` (default) is
+    /// what rs1090's own `live --record` writes; `uc8` is what
+    /// `rtl_sdr` and `dump1090 --iformat UC8` produce, so pick that
+    /// when feeding in a third-party capture for differential
+    /// testing.
+    #[arg(long, value_enum, default_value_t = SampleFormatArg::S8)]
+    format: SampleFormatArg,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum SampleFormatArg {
+    S8,
+    Uc8,
+}
+
+impl From<SampleFormatArg> for SampleFormat {
+    fn from(a: SampleFormatArg) -> Self {
+        match a {
+            SampleFormatArg::S8 => SampleFormat::S8,
+            SampleFormatArg::Uc8 => SampleFormat::Uc8,
+        }
+    }
 }
 
 #[derive(clap::Args, Debug)]
@@ -108,6 +131,12 @@ struct TrackArgs {
     /// Print a one-line summary of each tracked aircraft at the end.
     #[arg(long)]
     summary: bool,
+
+    /// On-disk sample format for the input file. `s8` (default) is
+    /// what rs1090's own `live --record` writes; `uc8` is what
+    /// `rtl_sdr` and `dump1090 --iformat UC8` produce.
+    #[arg(long, value_enum, default_value_t = SampleFormatArg::S8)]
+    format: SampleFormatArg,
 }
 
 fn parse_latlon(s: &str) -> std::result::Result<LatLon, String> {
@@ -179,9 +208,14 @@ fn run_replay(args: &ReplayArgs) -> Result<()> {
     let file =
         File::open(&args.file).with_context(|| format!("opening {}", args.file.display()))?;
     let reader = BufReader::new(file);
-    let mut source = IqFileSource::new(reader, args.sample_rate, args.center_freq);
+    let mut source = IqFileSource::with_format(
+        reader,
+        args.sample_rate,
+        args.center_freq,
+        args.format.into(),
+    );
 
-    let mut detector = FrameDetector::new();
+    let mut detector = FrameDetector::with_sample_rate(args.sample_rate);
     detector.set_min_confidence(args.min_confidence);
     if let Some(seed) = args.noise_seed {
         detector.reset_noise_floor(seed);
@@ -205,6 +239,7 @@ fn run_replay(args: &ReplayArgs) -> Result<()> {
         if n == 0 {
             break;
         }
+        #[allow(clippy::cast_precision_loss)]
         let chunk_time_secs = samples_consumed as f64 / sample_rate as f64;
         detector.process(&buf[..n], |frame| {
             // Errors from `print_frame` are I/O errors on stdout, which we
@@ -336,9 +371,14 @@ fn run_track(args: &TrackArgs) -> Result<()> {
     let file =
         File::open(&args.file).with_context(|| format!("opening {}", args.file.display()))?;
     let reader = BufReader::new(file);
-    let mut source = IqFileSource::new(reader, args.sample_rate, args.center_freq);
+    let mut source = IqFileSource::with_format(
+        reader,
+        args.sample_rate,
+        args.center_freq,
+        args.format.into(),
+    );
 
-    let mut detector = FrameDetector::new();
+    let mut detector = FrameDetector::with_sample_rate(args.sample_rate);
     detector.set_min_confidence(args.min_confidence);
     if let Some(seed) = args.noise_seed {
         detector.reset_noise_floor(seed);

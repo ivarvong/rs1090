@@ -32,21 +32,141 @@
 
 #![allow(clippy::doc_markdown)]
 
-/// Samples per Mode S bit at the canonical 2 MS/s rate.
-pub const SAMPLES_PER_BIT: usize = 2;
+extern crate alloc;
+use alloc::vec::Vec;
 
-/// Length in samples of the Mode S preamble at 2 MS/s.
+/// Mode S bit duration: 1 microsecond per bit (1 Mbit/s data rate).
+const BIT_DURATION_US: f64 = 1.0;
+
+/// Preamble length in microseconds (Mode S spec).
+const PREAMBLE_DURATION_US: f64 = 8.0;
+
+/// Pulse leading-edge positions in microseconds within the preamble window.
+/// These come straight from the Mode S spec: pulses at 0.0, 1.0, 3.5, 4.5 µs.
+const PREAMBLE_PULSE_OFFSETS_US: [f64; 4] = [0.0, 1.0, 3.5, 4.5];
+
+/// Mode S pulse width in microseconds (the rising-edge-to-falling-edge
+/// duration of a single PPM pulse).
+const PULSE_WIDTH_US: f64 = 0.5;
+
+/// Per-sample-rate constants derived from the Mode S spec.
 ///
-/// The preamble is 8 µs long; at 2 MS/s that's 16 samples.
+/// Built from the sample rate at runtime so the demodulator can handle the
+/// two ADS-B rates that matter in practice:
+///
+/// - **2.0 MS/s** — rs1090's native rate; integer 2 samples per bit. Most
+///   third-party rs1090 captures use this.
+/// - **2.4 MS/s** — `dump1090`'s native rate, the de facto reference. 2.4
+///   samples per bit is fractional, so the bit slicer (see [`slice_bits`])
+///   rounds each half-bit's sample position to the nearest integer.
+///
+/// Other rates (3.0, 4.0, …) work transparently as integer-SPB
+/// configurations; we just haven't validated them on real captures.
+#[derive(Debug, Clone)]
+pub struct DemodConfig {
+    /// Sample rate in samples per second (e.g., 2_000_000).
+    pub sample_rate: u32,
+    /// Fractional samples per Mode S bit: `sample_rate / 1_000_000` since
+    /// Mode S is 1 Mbit/s. At 2.0 MS/s this is 2.0; at 2.4 MS/s it's 2.4.
+    pub samples_per_bit_f64: f64,
+    /// `samples_per_bit_f64` rounded to the nearest integer. Useful
+    /// for size-of-frame estimates and rough scratch buffer sizing;
+    /// the actual per-bit math goes through the fractional
+    /// `samples_per_bit_f64` so this field never appears on the
+    /// bit-slicer hot path.
+    #[allow(dead_code)]
+    pub samples_per_bit: usize,
+    /// Preamble window length in samples = round(8 µs × SPB).
+    pub preamble_samples: usize,
+    /// Sample indices within the preamble window where pulses are
+    /// present. Computed by overlapping each spec'd pulse window
+    /// (0–0.5, 1.0–1.5, 3.5–4.0, 4.5–5.0 µs) onto the input sample
+    /// grid and listing every input sample touched by *any* pulse.
+    ///
+    /// - **2.0 MS/s**: 4 indices `[0, 2, 7, 9]` (each pulse fits in one sample).
+    /// - **2.4 MS/s**: 8 indices `[0, 1, 2, 3, 8, 9, 10, 11]` (each pulse
+    ///   spans 1.2 samples, so two input samples per pulse contribute
+    ///   to the score).
+    ///
+    /// The variable length is why this is a `Vec` rather than a fixed-
+    /// size array; at the rates we care about (≤4 MS/s) it's still
+    /// short and cache-friendly.
+    pub preamble_high_idx: Vec<usize>,
+    /// Complement of [`Self::preamble_high_idx`] over
+    /// `0..preamble_samples`. Pre-built so the per-window scoring loop
+    /// (see [`preamble_score`]) doesn't have to filter on the hot path.
+    pub preamble_low_idx: Vec<usize>,
+}
+
+impl DemodConfig {
+    /// Build a config for the given sample rate (Hz). Mode S parameters
+    /// are derived from the rate at construction time.
+    #[must_use]
+    pub fn for_sample_rate(sample_rate: u32) -> Self {
+        assert!(
+            sample_rate >= 2_000_000,
+            "Mode S bits are 1 µs long; need ≥2 MS/s for two samples per bit. got {sample_rate}",
+        );
+        let spb_us = f64::from(sample_rate) / 1_000_000.0;
+        let samples_per_bit_f64 = spb_us * BIT_DURATION_US;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let preamble_samples = (PREAMBLE_DURATION_US * spb_us).round() as usize;
+        // For each pulse, list every input sample that the pulse's
+        // 0.5 µs window overlaps. At 2.0 MS/s each pulse fits in one
+        // sample; at 2.4 MS/s each pulse spans two.
+        let mut preamble_high_idx: Vec<usize> = Vec::new();
+        for &p_us in &PREAMBLE_PULSE_OFFSETS_US {
+            let start = p_us * spb_us;
+            let end = (p_us + PULSE_WIDTH_US) * spb_us;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let first = start.floor() as usize;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let last = (end - 1e-9).floor() as usize; // exclusive end
+            for s in first..=last {
+                if s < preamble_samples && !preamble_high_idx.contains(&s) {
+                    preamble_high_idx.push(s);
+                }
+            }
+        }
+        preamble_high_idx.sort_unstable();
+        let high_set: std::collections::BTreeSet<usize> =
+            preamble_high_idx.iter().copied().collect();
+        let preamble_low_idx: Vec<usize> = (0..preamble_samples)
+            .filter(|i| !high_set.contains(i))
+            .collect();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let samples_per_bit = samples_per_bit_f64.round() as usize;
+        Self {
+            sample_rate,
+            samples_per_bit_f64,
+            samples_per_bit,
+            preamble_samples,
+            preamble_high_idx,
+            preamble_low_idx,
+        }
+    }
+
+    /// Number of input samples occupied by `n_bits` Mode S bits at this
+    /// sample rate. Used to size scratch buffers and bounds-check slices
+    /// against fractional-SPB math.
+    #[inline]
+    #[must_use]
+    pub fn samples_for_bits(&self, n_bits: usize) -> usize {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let v = (n_bits as f64 * self.samples_per_bit_f64).ceil() as usize;
+        v
+    }
+
+}
+
+/// Canonical 2 MS/s constants, kept for backwards compatibility with
+/// callers (notably test fixtures and the live SDR path) that haven't
+/// been retrofitted to take a [`DemodConfig`]. New code should derive its
+/// numbers from `DemodConfig::for_sample_rate(2_000_000)`.
+pub const SAMPLES_PER_BIT: usize = 2;
 pub const PREAMBLE_SAMPLES: usize = 16;
-
-/// Sample indices within a 16-sample preamble window that should be "high"
-/// (pulse present). Pulses are at 0.0, 1.0, 3.5, 4.5 µs; at 2 MS/s the leading
-/// edges land at samples 0, 2, 7, 9.
 pub const PREAMBLE_HIGH_IDX: [usize; 4] = [0, 2, 7, 9];
-
-/// Sample indices within the preamble window that should be "low" (no pulse).
-/// The complement of [`PREAMBLE_HIGH_IDX`].
+#[allow(dead_code)]
 pub const PREAMBLE_LOW_IDX: [usize; 12] = [1, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15];
 
 // --- Noise floor -------------------------------------------------------------
@@ -135,18 +255,62 @@ impl NoiseFloor {
 
 // --- Preamble correlator -----------------------------------------------------
 
-/// Score a 16-sample magnitude window against the Mode S preamble shape.
+/// Score a magnitude window against the Mode S preamble shape under the
+/// given config. Returns `sum(window[high_idx]) - sum(window[low_idx])`,
+/// positive (and large) when the window looks like a preamble.
 ///
-/// Returns `sum(window[high_idx]) - sum(window[low_idx])`, which is positive
-/// (and large) when the window looks like a preamble. The score is `i32`
-/// because the difference of u16 sums fits comfortably and we want signed
-/// arithmetic for the threshold comparison.
-///
-/// This is intentionally a pure function over a fixed-size slice — the
-/// surrounding sliding-window driver is a separate concern and can live in
-/// the frame-detector stage where it has access to the full input stream.
+/// `window.len()` must equal `cfg.preamble_samples`. The score is `i32`
+/// for signed threshold comparison.
 #[inline]
 #[must_use]
+pub fn preamble_score_cfg(cfg: &DemodConfig, window: &[u16]) -> i32 {
+    debug_assert_eq!(
+        window.len(),
+        cfg.preamble_samples,
+        "preamble window must match cfg.preamble_samples",
+    );
+    let mut high: u32 = 0;
+    let mut low: u32 = 0;
+    for &i in &cfg.preamble_high_idx {
+        high += u32::from(window[i]);
+    }
+    for &i in &cfg.preamble_low_idx {
+        low += u32::from(window[i]);
+    }
+    // Normalize so the score's magnitude is comparable across rates:
+    // at 2 MS/s we have 4 high samples vs 12 low; at 2.4 MS/s we have
+    // 8 high vs 11 low. Without normalization the 2.4 score would be
+    // ~2× as large as the 2 MS/s score for the same SNR, throwing off
+    // the [`preamble_clears_threshold`] comparison (which is tuned for
+    // the 4/12 split). Divide each sum by its index count to bring
+    // both back to "average magnitude per high sample" minus
+    // "average magnitude per low sample", multiplied by the canonical
+    // 4-high count so the threshold gain stays the same.
+    #[allow(clippy::cast_possible_wrap)]
+    let high_count = cfg.preamble_high_idx.len() as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let low_count = cfg.preamble_low_idx.len() as i64;
+    let high_avg = if high_count == 0 {
+        0
+    } else {
+        i64::from(high) * 4 / high_count
+    };
+    let low_avg = if low_count == 0 {
+        0
+    } else {
+        i64::from(low) * 12 / low_count
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let s = (high_avg - low_avg) as i32;
+    s
+}
+
+/// Score a 16-sample magnitude window against the canonical 2 MS/s
+/// preamble. Thin wrapper around [`preamble_score_cfg`] for legacy
+/// callers; new code should pass a [`DemodConfig`] explicitly.
+#[inline]
+#[must_use]
+#[allow(dead_code)]
 pub fn preamble_score(window: &[u16; PREAMBLE_SAMPLES]) -> i32 {
     let mut high: u32 = 0;
     let mut low: u32 = 0;
@@ -156,8 +320,6 @@ pub fn preamble_score(window: &[u16; PREAMBLE_SAMPLES]) -> i32 {
     for &i in &PREAMBLE_LOW_IDX {
         low += u32::from(window[i]);
     }
-    // Cast through i64 to avoid surprises; both sums fit in u32, but the
-    // difference may be negative.
     (high as i64 - low as i64) as i32
 }
 
@@ -215,15 +377,85 @@ pub fn slice_bit(s0: u16, s1: u16) -> (bool, u8) {
     (bit, conf)
 }
 
-/// Slice a run of bits from a magnitude buffer.
+/// Slice a run of bits from a magnitude buffer using the given config.
 ///
-/// `samples.len()` must equal `2 * bits.len()` and `bits.len()` must equal
-/// `confidences.len()`. Each pair `samples[2i..2i+2]` decodes to one bit.
+/// Each bit's first-half and second-half magnitude samples come from
+/// [`DemodConfig::bit_sample_offsets`], which handles both integer
+/// (2 MS/s) and fractional (2.4 MS/s) samples-per-bit correctly. The
+/// fractional case rounds each half-bit position to the nearest input
+/// sample; over many bits the rounding averages out — the bit-slicer's
+/// real signal is "which half had the brighter pulse," and that's
+/// preserved even at sub-sample rounding offsets.
+///
+/// `samples.len()` must cover `bits.len()` bits (use
+/// [`DemodConfig::samples_for_bits`] to size the slice); `bits.len()`
+/// must equal `confidences.len()`.
 ///
 /// # Panics
 ///
-/// Panics on length mismatch. This is a programmer error; the caller is
-/// expected to size the output buffers from the DF-derived frame length.
+/// Panics on length mismatch.
+pub fn slice_bits_cfg(
+    cfg: &DemodConfig,
+    samples: &[u16],
+    bits: &mut [bool],
+    confidences: &mut [u8],
+) {
+    assert_eq!(bits.len(), confidences.len(), "bit/conf length mismatch");
+    let need = cfg.samples_for_bits(bits.len());
+    assert!(
+        samples.len() >= need,
+        "need ≥{need} samples for {} bits at {} MS/s, got {}",
+        bits.len(),
+        cfg.sample_rate,
+        samples.len(),
+    );
+    let spb = cfg.samples_per_bit_f64;
+    let last_idx = samples.len() - 1;
+    for (i, (bit, conf)) in bits.iter_mut().zip(confidences.iter_mut()).enumerate() {
+        // Read each half-bit's magnitude at the *start* of that half,
+        // matching the existing 2 MS/s convention (where the slicer
+        // reads samples[2i] and samples[2i+1] — sample 0 of each
+        // half). At fractional SPB the position falls between integer
+        // samples, so we linearly interpolate the two nearest. This
+        // keeps the 2 MS/s case bit-identical to the old integer-only
+        // path (positions 0 and 1 hit exact integer samples) while
+        // letting 2.4 MS/s read the correct fractional position.
+        let start = i as f64 * spb;
+        let s0 = interp_sample(samples, start, last_idx);
+        let s1 = interp_sample(samples, start + spb * 0.5, last_idx);
+        let (b, c) = slice_bit(s0, s1);
+        *bit = b;
+        *conf = c;
+    }
+}
+
+/// Linearly interpolate the magnitude at fractional sample position
+/// `pos` from `samples`. Both at-or-past-end and negative positions
+/// clamp to the corresponding endpoint sample — the bit slicer's call
+/// sites guarantee the bulk of accesses are in-range, but the
+/// clamping handles the last-bit boundary cleanly.
+#[inline]
+fn interp_sample(samples: &[u16], pos: f64, last_idx: usize) -> u16 {
+    if pos <= 0.0 {
+        return samples[0];
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let i = pos.floor() as usize;
+    if i >= last_idx {
+        return samples[last_idx];
+    }
+    let frac = pos - i as f64;
+    let s0 = f64::from(samples[i]);
+    let s1 = f64::from(samples[i + 1]);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let v = (s0 * (1.0 - frac) + s1 * frac).round() as u32;
+    v.min(u32::from(u16::MAX)) as u16
+}
+
+/// Slice a run of bits at the canonical 2 MS/s rate. Thin wrapper around
+/// [`slice_bits_cfg`] for legacy callers; new code should pass a
+/// [`DemodConfig`] explicitly.
+#[allow(dead_code)]
 pub fn slice_bits(samples: &[u16], bits: &mut [bool], confidences: &mut [u8]) {
     assert_eq!(bits.len(), confidences.len(), "bit/conf length mismatch");
     assert_eq!(
