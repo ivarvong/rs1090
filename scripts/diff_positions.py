@@ -134,34 +134,47 @@ def haversine_nm(lat1, lon1, lat2, lon2):
     return 2 * R_NM * math.asin(min(1.0, math.sqrt(a)))
 
 
-def simulate_pymodes_tracker(frames, reference, pair_window=10):
+def simulate_pymodes_tracker(frames, reference, pair_window_frames=10):
     """
     Walk the ordered frames and emit per-aircraft positions exactly
     where pyModeS's global decode would produce one, given:
 
-      - even/odd pair within `pair_window` frames of the same ICAO
+      - even/odd pair within `pair_window_frames` of the same ICAO
+        (counted *per ICAO*, not over the global stream — aircraft
+        interleave heavily on a busy receiver, so a global window
+        spuriously rejects valid pairs as the active-aircraft count
+        rises)
       - clean CRC, DF 17/18, has CPR fields
       - both members of the pair pass pms.adsb.position()
 
-    Returns a dict[icao] -> list of (frame_index, lat, lon, source).
+    Returns a dict[icao] -> list of (global_frame_index, lat, lon, source).
     """
-    state = {}  # icao -> {'even': (idx, hex), 'odd': (idx, hex)}
+    # Per-ICAO state: (per_icao_index, global_index, hex) for the most
+    # recent even and odd, plus a counter of how many position frames
+    # we've seen for this ICAO so far.
+    state = {}
     positions = defaultdict(list)
+    seen_count = defaultdict(int)
     for i, f in enumerate(frames):
         if f["crc"] != "clean" or f["df"] not in (17, 18):
             continue
         if "cpr_odd" not in f or "icao" not in f:
             continue
         icao = f["icao"]
+        seen_count[icao] += 1
+        local_idx = seen_count[icao]
         slot = "odd" if f["cpr_odd"] else "even"
         other = "even" if f["cpr_odd"] else "odd"
         st = state.setdefault(icao, {})
-        st[slot] = (i, f["hex"])
-        if other in st and abs(st[other][0] - i) <= pair_window:
-            even_hex = st["even"][1]
-            odd_hex = st["odd"][1]
-            t_even = st["even"][0] * 1.0  # arbitrary unit; pyModeS uses
-            t_odd = st["odd"][0] * 1.0    # the relative order only.
+        st[slot] = (local_idx, i, f["hex"])
+        if other in st and abs(st[other][0] - local_idx) <= pair_window_frames:
+            even_hex = st["even"][2]
+            odd_hex = st["odd"][2]
+            # Use the per-ICAO local index as the pseudo-timestamp;
+            # pyModeS only uses the *relative* ordering of the two,
+            # so any consistent ordering works.
+            t_even = st["even"][0] * 1.0
+            t_odd = st["odd"][0] * 1.0
             try:
                 pos = adsb.position(even_hex, odd_hex, t_even, t_odd)
             except Exception:
@@ -190,7 +203,10 @@ def main() -> int:
         "--pair-window",
         type=int,
         default=10,
-        help="pyModeS pair window in frames (default: 10)",
+        help="pyModeS pair window, measured per-ICAO in frames "
+        "(default: 10). At ~1 position frame per second per active "
+        "aircraft, 10 ≈ the 10 s wall-clock window rs1090's tracker "
+        "uses.",
     )
     args = ap.parse_args()
 
@@ -231,7 +247,7 @@ def main() -> int:
     # `pair_window` from the CLI so we can shift it if needed (rs1090
     # uses 10s of wall time; we use frame distance as a proxy).
     pms_positions = simulate_pymodes_tracker(
-        frames, (ref_lat, ref_lon), pair_window=args.pair_window
+        frames, (ref_lat, ref_lon), pair_window_frames=args.pair_window
     )
 
     # ----- Report -----
