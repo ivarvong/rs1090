@@ -57,10 +57,14 @@ RS_RE = re.compile(
 
 
 def run_dump1090_fa(uc8_path: Path) -> set[str]:
+    # dump1090's default enables 1-bit CRC correction; rs1090 does
+    # the same. We compare with both sides correcting so the metric
+    # reflects "what each decoder ships as a best-effort frame," not
+    # "what each decoder ships before any correction."
     proc = subprocess.run(
         [
             DUMP1090_FA, "--ifile", str(uc8_path), "--iformat", "UC8",
-            "--raw", "--no-fix",
+            "--raw",
         ],
         capture_output=True, text=True, check=False,
     )
@@ -73,6 +77,7 @@ def run_dump1090_fa(uc8_path: Path) -> set[str]:
 
 
 def run_readsb(uc8_path: Path) -> set[str]:
+    # Same correction-on baseline as dump1090: default is `--fix`.
     proc = subprocess.run(
         [
             "readsb",
@@ -81,7 +86,6 @@ def run_readsb(uc8_path: Path) -> set[str]:
             "--iformat=UC8",
             "--raw",
             "--no-interactive",
-            "--no-fix",
         ],
         capture_output=True, text=True, check=False, timeout=600,
     )
@@ -118,7 +122,17 @@ def run_rs1090(uc8_path: Path, sample_rate: int) -> set[str]:
             continue
         hex_frame = m.group("hex").upper()
         crc = m.group("crc")
-        if crc == "clean":
+        # Apples-to-apples with dump1090 --no-fix:
+        #   - `clean` CRC on DF 11/17/18 — directly comparable.
+        #   - `corrected:N` on DF 11/17/18 — rs1090's slicer made a
+        #     1-bit error our CRC corrector fixed; the resulting hex
+        #     is identical to what dump1090's slicer would produce
+        #     directly. The harness comparing hex sets cares about
+        #     the *bytes*, not which decoder needed correction.
+        #   - `failed` on DF 0/4/5/16/20/21 — address-XOR DFs whose
+        #     "failed" CRC is the design, not a bug; the syndrome
+        #     bytes are the payload dump1090 ships.
+        if crc == "clean" or crc.startswith("corrected"):
             frames.add(hex_frame)
             continue
         if crc == "failed":
