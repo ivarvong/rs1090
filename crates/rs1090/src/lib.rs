@@ -26,6 +26,7 @@ pub mod message;
 // that need access for tests or benchmarks should enable the
 // `test-utils` feature and use [`test_utils`].
 pub(crate) mod demod;
+pub(crate) mod demod_2400;
 pub(crate) mod magnitude;
 
 #[cfg(feature = "std")]

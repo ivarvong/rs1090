@@ -393,6 +393,23 @@ impl FrameDetector {
         }
         let buf = &self.mag_buf;
 
+        // 1.5. Sample-rate-specific demod dispatch. 2.4 MS/s gets the
+        //      dump1090-ported phase-cycling demodulator; everything
+        //      else uses the integer-SPB-friendly generic path below.
+        if self.cfg.sample_rate == 2_400_000 {
+            let min_conf = self.min_confidence;
+            let consumed = run_2400(&mut self.floor, buf, min_conf, &mut on_frame);
+            // 3. Stash trailing window for next call (same shape as the
+            //    generic path, but the index we resume from is what the
+            //    2400 path consumed up to).
+            let tail_len = buf.len() - consumed;
+            let retain = tail_len.min(self.carry.len());
+            let copy_from = buf.len() - retain;
+            self.carry[..retain].copy_from_slice(&buf[copy_from..]);
+            self.carry_len = retain;
+            return;
+        }
+
         // 2. Walk the buffer looking for preambles. Update the floor at
         //    every sample so it tracks across both signal and noise.
         let mut i = 0usize;
@@ -503,6 +520,34 @@ impl FrameDetector {
     pub fn sample_rate(&self) -> u32 {
         self.cfg.sample_rate
     }
+}
+
+/// Adapter that runs `demod_2400::process_2400` and translates its
+/// emitted `DemodResult`s into `Frame`s via `on_frame`. Returns the
+/// number of magnitude samples consumed, so the caller can compute
+/// the carry-over.
+fn run_2400<F: FnMut(&Frame)>(
+    floor: &mut NoiseFloor,
+    buf: &[u16],
+    min_confidence: u8,
+    mut on_frame: F,
+) -> usize {
+    use crate::demod_2400;
+    let mut last_consumed = 0usize;
+    demod_2400::process_2400(floor, buf, min_confidence, |res| {
+        let len = res.df.frame_bytes();
+        #[allow(clippy::cast_possible_truncation)]
+        let frame = Frame {
+            bytes: res.bytes,
+            len: len as u8,
+            df: res.df,
+            crc: res.crc,
+            confidence: res.confidence,
+        };
+        on_frame(&frame);
+        last_consumed = last_consumed.max(res.advance);
+    });
+    last_consumed.min(buf.len())
 }
 
 /// Decode the first byte of the frame (5-bit DF + 3 bits) given the
