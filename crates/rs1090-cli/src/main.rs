@@ -67,6 +67,15 @@ struct ReplayArgs {
     /// settle.
     #[arg(long)]
     noise_seed: Option<u16>,
+
+    /// Prefix each frame line with `T+<seconds>` where seconds is the
+    /// virtual capture time computed from sample index / sample rate.
+    /// The differential-test harnesses use this to enforce a real
+    /// wall-clock pair window when comparing against pyModeS — without
+    /// it, sparsely-seen aircraft can produce stale-pair false
+    /// positives.
+    #[arg(long)]
+    timestamps: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -182,20 +191,33 @@ fn run_replay(args: &ReplayArgs) -> Result<()> {
     let mut out = BufWriter::new(stdout.lock());
     let mut buf = vec![Iq::default(); 65_536];
     let mut frame_count = 0u64;
+    // Virtual capture time, in seconds since sample 0. We tick this
+    // up per buffer (not per frame — FrameDetector batches all
+    // frames found in a chunk). Within a 65_536-sample chunk at
+    // 2 MS/s, all frames share a timestamp accurate to ±16 ms, well
+    // below any pair-window threshold a comparator cares about.
+    let mut samples_consumed: u64 = 0;
+    let sample_rate = u64::from(args.sample_rate);
+    let emit_ts = args.timestamps;
 
     loop {
         let n = source.read(&mut buf).context("reading samples")?;
         if n == 0 {
             break;
         }
+        let chunk_time_secs = samples_consumed as f64 / sample_rate as f64;
         detector.process(&buf[..n], |frame| {
             // Errors from `print_frame` are I/O errors on stdout, which we
             // surface by counting and reporting at the end. We can't return
             // a Result from the callback without complicating the trait;
             // a write failure here is non-recoverable anyway.
+            if emit_ts {
+                let _ = write!(out, "T+{chunk_time_secs:.3} ");
+            }
             let _ = print_frame(&mut out, frame);
             frame_count += 1;
         });
+        samples_consumed += n as u64;
     }
     out.flush().context("flushing stdout")?;
     eprintln!("rs1090: {frame_count} frames");

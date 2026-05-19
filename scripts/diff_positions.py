@@ -61,10 +61,13 @@ except ImportError:
     sys.exit("error: pyModeS not installed. Try `pip install pyModeS`.")
 
 
-# rs1090-cli's `replay` output (one line per detected frame):
-#   DFnn HEX clean|corrected:N|failed conf=N ICAO=ABC123 ... cpr-even/odd(LAT,LON) ...
+# rs1090-cli's `replay --timestamps` output (one line per detected frame):
+#   [T+SECONDS ]DFnn HEX clean|corrected:N|failed conf=N ICAO=ABC123 ... cpr-even/odd(LAT,LON) ...
+# The leading `T+SECONDS ` is optional — older captures without it
+# still parse, just without wall-clock pair-window enforcement.
 REPLAY_LINE = re.compile(
-    r"^DF(?P<df>\d+)\s+(?P<hex>[0-9A-F]+)\s+(?P<crc>clean|corrected:\d+|failed)\s+"
+    r"^(?:T\+(?P<t>[\d.]+)\s+)?"
+    r"DF(?P<df>\d+)\s+(?P<hex>[0-9A-F]+)\s+(?P<crc>clean|corrected:\d+|failed)\s+"
     r"conf=(?P<conf>\d+)\s*(?P<rest>.*)$"
 )
 REPLAY_ICAO = re.compile(r"ICAO=([0-9A-F]{6})")
@@ -87,12 +90,16 @@ def run(cmd: list[str]) -> str:
 
 
 def parse_replay(raw: str):
-    """Yield dicts for every recognised replay line. Order preserved."""
+    """Yield dicts for every recognised replay line. Order preserved.
+    Each dict includes a `t` field if the replay was run with
+    `--timestamps`, otherwise `t` is `None`.
+    """
     for line in raw.splitlines():
         m = REPLAY_LINE.match(line)
         if not m:
             continue
         d = {
+            "t": float(m["t"]) if m["t"] else None,
             "df": int(m["df"]),
             "hex": m["hex"],
             "crc": m["crc"],
@@ -134,24 +141,28 @@ def haversine_nm(lat1, lon1, lat2, lon2):
     return 2 * R_NM * math.asin(min(1.0, math.sqrt(a)))
 
 
-def simulate_pymodes_tracker(frames, reference, pair_window_frames=10):
+def simulate_pymodes_tracker(
+    frames,
+    reference,
+    pair_window_secs=10.0,
+    fallback_pair_window_frames=10,
+):
     """
     Walk the ordered frames and emit per-aircraft positions exactly
-    where pyModeS's global decode would produce one, given:
+    where pyModeS's global decode would produce one.
 
-      - even/odd pair within `pair_window_frames` of the same ICAO
-        (counted *per ICAO*, not over the global stream — aircraft
-        interleave heavily on a busy receiver, so a global window
-        spuriously rejects valid pairs as the active-aircraft count
-        rises)
-      - clean CRC, DF 17/18, has CPR fields
-      - both members of the pair pass pms.adsb.position()
+    Pair window is enforced in **wall-clock seconds** when the
+    replay was run with `--timestamps` (each frame carries `t`).
+    Without timestamps we fall back to a per-ICAO frame distance,
+    which is loose for sparsely-seen aircraft — see commit history
+    for why this matters (10-min Mac capture had 3 aircraft where
+    a frame-distance window happily paired even+odd halves several
+    minutes apart in real time, getting pyModeS to "decode" them
+    to physically impossible positions).
 
-    Returns a dict[icao] -> list of (global_frame_index, lat, lon, source).
+    Returns a dict[icao] -> list of (global_frame_index, lat, lon,
+    source).
     """
-    # Per-ICAO state: (per_icao_index, global_index, hex) for the most
-    # recent even and odd, plus a counter of how many position frames
-    # we've seen for this ICAO so far.
     state = {}
     positions = defaultdict(list)
     seen_count = defaultdict(int)
@@ -166,21 +177,34 @@ def simulate_pymodes_tracker(frames, reference, pair_window_frames=10):
         slot = "odd" if f["cpr_odd"] else "even"
         other = "even" if f["cpr_odd"] else "odd"
         st = state.setdefault(icao, {})
-        st[slot] = (local_idx, i, f["hex"])
-        if other in st and abs(st[other][0] - local_idx) <= pair_window_frames:
-            even_hex = st["even"][2]
-            odd_hex = st["odd"][2]
-            # Use the per-ICAO local index as the pseudo-timestamp;
-            # pyModeS only uses the *relative* ordering of the two,
-            # so any consistent ordering works.
-            t_even = st["even"][0] * 1.0
-            t_odd = st["odd"][0] * 1.0
-            try:
-                pos = adsb.position(even_hex, odd_hex, t_even, t_odd)
-            except Exception:
-                pos = None
-            if pos and pos[0] is not None and pos[1] is not None:
-                positions[icao].append((i, pos[0], pos[1], "global"))
+        # (per_icao_idx, t_seconds_or_None, global_idx, hex)
+        st[slot] = (local_idx, f["t"], i, f["hex"])
+
+        if other not in st:
+            continue
+        # Decide whether the most recent even+odd pair is fresh
+        # enough to be a valid global-decode candidate.
+        t_a = st[other][1]
+        t_b = st[slot][1]
+        if t_a is not None and t_b is not None:
+            in_window = abs(t_b - t_a) <= pair_window_secs
+        else:
+            in_window = (
+                abs(st[other][0] - local_idx) <= fallback_pair_window_frames
+            )
+        if not in_window:
+            continue
+
+        even_hex = st["even"][3]
+        odd_hex = st["odd"][3]
+        t_even = st["even"][1] if st["even"][1] is not None else float(st["even"][0])
+        t_odd = st["odd"][1] if st["odd"][1] is not None else float(st["odd"][0])
+        try:
+            pos = adsb.position(even_hex, odd_hex, t_even, t_odd)
+        except Exception:
+            pos = None
+        if pos and pos[0] is not None and pos[1] is not None:
+            positions[icao].append((i, pos[0], pos[1], "global"))
     return positions
 
 
@@ -201,12 +225,12 @@ def main() -> int:
     )
     ap.add_argument(
         "--pair-window",
-        type=int,
-        default=10,
-        help="pyModeS pair window, measured per-ICAO in frames "
-        "(default: 10). At ~1 position frame per second per active "
-        "aircraft, 10 ≈ the 10 s wall-clock window rs1090's tracker "
-        "uses.",
+        type=float,
+        default=10.0,
+        help="pyModeS pair window in **wall-clock seconds** when the "
+        "replay carries timestamps (run with `rs1090 replay --timestamps`); "
+        "falls back to per-ICAO frame distance otherwise. Default 10.0 "
+        "matches rs1090's internal CPR_PAIR_WINDOW.",
     )
     args = ap.parse_args()
 
@@ -220,11 +244,16 @@ def main() -> int:
     replay = run(
         [
             "cargo", "run", "--release", "--quiet", "-p", "rs1090-cli", "--",
-            "replay", str(iq_path),
+            "replay", "--timestamps", str(iq_path),
         ]
     )
     frames = list(parse_replay(replay))
-    print(f"#   {len(frames)} frames", file=sys.stderr)
+    have_ts = any(f["t"] is not None for f in frames)
+    print(
+        f"#   {len(frames)} frames "
+        f"({'with' if have_ts else 'without'} wall-clock timestamps)",
+        file=sys.stderr,
+    )
 
     print(f"# track   {iq_path}…", file=sys.stderr)
     track = run(
@@ -247,7 +276,7 @@ def main() -> int:
     # `pair_window` from the CLI so we can shift it if needed (rs1090
     # uses 10s of wall time; we use frame distance as a proxy).
     pms_positions = simulate_pymodes_tracker(
-        frames, (ref_lat, ref_lon), pair_window_frames=args.pair_window
+        frames, (ref_lat, ref_lon), pair_window_secs=args.pair_window
     )
 
     # ----- Report -----
@@ -287,10 +316,21 @@ def main() -> int:
             delta = haversine_nm(
                 rs_last[0], rs_last[1], pms_last[1], pms_last[2]
             )
+            # Only fire ⚠ on a *like-for-like* comparison: both
+            # decoders' last fix is from a fresh global pair. If
+            # rs1090's last fix is `local`, it's a single-message
+            # fallback against the receiver reference, possibly
+            # snapshotted at a different moment than pyModeS's
+            # most recent pair; the resulting delta then mostly
+            # reflects how far the aircraft moved between those
+            # two moments, not decoder error.
+            comparable = rs_last[2] == "global"
             mark = ""
-            if delta > args.threshold_nm:
+            if delta > args.threshold_nm and comparable:
                 mark = "  ⚠"
                 flagged += 1
+            elif delta > args.threshold_nm:
+                mark = "  (rs:local, timing-mismatch likely)"
             print(f"{icao:<8} {rs_str:<38} {pms_str:<26} {delta:>7.2f}{mark}")
         else:
             print(f"{icao:<8} {rs_str:<38} {pms_str:<26} {'—':>8}")
