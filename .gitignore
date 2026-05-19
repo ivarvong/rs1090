@@ -30,3 +30,7 @@ apps/ios/SkyAR/build/
 apps/ios/SkyAR/DerivedData/
 **/*.xcuserstate
 **/xcuserdata/
+
+# Python venv for the differential-test harnesses
+# (pyModeS pinned to v2 in scripts/diff_*.py).
+.venv/
