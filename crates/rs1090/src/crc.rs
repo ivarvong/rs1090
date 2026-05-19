@@ -98,6 +98,25 @@ pub fn crc24_bitwise(bytes: &[u8]) -> u32 {
 /// [`LONG_FRAME_BYTES`]. Caller is responsible for length-gating; this is a
 /// programmer error, not runtime input.
 pub fn check(bytes: &mut [u8]) -> CrcOutcome {
+    check_with_depth(bytes, 1)
+}
+
+/// CRC check with a configurable correction depth.
+///
+/// `max_bit_errors`:
+/// - `0` — clean-CRC only; never corrects.
+/// - `1` — accepts single-bit errors (matches [`check`]).
+/// - `2` — also accepts 2-bit errors via [`two_bit_correction`]. Mode S
+///   CRC-24's structural properties make 2-bit corrections genuinely
+///   useful for DF 17/18 (where the CRC is a pure clean checksum); for
+///   DF 11 the 1-bit budget is the maximum dump1090 attempts.
+///
+/// In the 2-bit case the returned [`CrcOutcome::Corrected`] reports
+/// the *lower* bit position. Both bits are flipped in `bytes` in
+/// place. Collisions (multiple 2-bit pairs with the same XOR
+/// syndrome) are extremely rare with this code; the lower-index pair
+/// wins, matching dump1090's `modesChecksumDiagnose`.
+pub fn check_with_depth(bytes: &mut [u8], max_bit_errors: u8) -> CrcOutcome {
     let n = bytes.len();
     assert!(
         n == SHORT_FRAME_BYTES || n == LONG_FRAME_BYTES,
@@ -107,15 +126,32 @@ pub fn check(bytes: &mut [u8]) -> CrcOutcome {
     if syndrome == 0 {
         return CrcOutcome::Clean;
     }
-    if let Some(bit) = single_bit_correction(syndrome, n) {
-        // Flip the bit in place.
-        let byte = (bit / 8) as usize;
-        let mask = 1u8 << (7 - (bit % 8));
-        bytes[byte] ^= mask;
-        debug_assert_eq!(crc24(bytes), 0, "correction did not yield zero syndrome");
-        return CrcOutcome::Corrected { bit };
+    if max_bit_errors >= 1 {
+        if let Some(bit) = single_bit_correction(syndrome, n) {
+            flip_bit_in_place(bytes, bit);
+            debug_assert_eq!(crc24(bytes), 0, "1-bit correction did not yield zero syndrome");
+            return CrcOutcome::Corrected { bit };
+        }
+    }
+    if max_bit_errors >= 2 {
+        if let Some((a, b)) = two_bit_correction(syndrome, n) {
+            flip_bit_in_place(bytes, a);
+            flip_bit_in_place(bytes, b);
+            debug_assert_eq!(crc24(bytes), 0, "2-bit correction did not yield zero syndrome");
+            // Carry only the first bit in the outcome; the second is
+            // implied by the syndrome-table arithmetic and isn't
+            // load-bearing for any downstream consumer.
+            return CrcOutcome::Corrected { bit: a };
+        }
     }
     CrcOutcome::Failed
+}
+
+#[inline]
+fn flip_bit_in_place(bytes: &mut [u8], bit: u16) {
+    let byte = (bit / 8) as usize;
+    let mask = 1u8 << (7 - (bit % 8));
+    bytes[byte] ^= mask;
 }
 
 /// Find a single-bit-error position whose syndrome matches `syndrome`, or
@@ -131,6 +167,37 @@ fn single_bit_correction(syndrome: u32, n: usize) -> Option<u16> {
     // table with binary search would be 2-3x faster but the gain is in the
     // noise next to the rest of the decode budget.
     table.iter().position(|&s| s == syndrome).map(|i| i as u16)
+}
+
+/// Find a two-bit-error correction whose syndrome matches `syndrome`, or
+/// `None`. `n` is the frame length in bytes.
+///
+/// Mode S CRC over 2-bit errors at positions `(i, j)` produces syndrome
+/// `SYNDROME[i] XOR SYNDROME[j]`. We brute-force the O(n²) pairs on the
+/// rare "CRC failed but worth a deeper try" path. With long frames the
+/// inner loop is ~6200 XOR-compare ops, well under a millisecond.
+///
+/// Returns the first `(i, j)` pair with `i < j` whose XOR matches. If
+/// multiple pairs match (collisions are possible but very rare with
+/// Mode S CRC-24), the lower-index pair wins — same convention as
+/// dump1090.
+fn two_bit_correction(syndrome: u32, n: usize) -> Option<(u16, u16)> {
+    let table = match n {
+        SHORT_FRAME_BYTES => &SYNDROME_SHORT[..],
+        LONG_FRAME_BYTES => &SYNDROME_LONG[..],
+        _ => return None,
+    };
+    let nbits = table.len();
+    for i in 0..nbits {
+        let ti = table[i];
+        // syndrome = table[i] ^ table[j], so table[j] = syndrome ^ table[i]
+        let need = syndrome ^ ti;
+        // Search j > i only (avoid duplicates and self-pairs).
+        if let Some(rel) = table[i + 1..].iter().position(|&s| s == need) {
+            return Some((u16::try_from(i).ok()?, u16::try_from(i + 1 + rel).ok()?));
+        }
+    }
+    None
 }
 
 // --- Tables ------------------------------------------------------------------

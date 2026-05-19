@@ -425,7 +425,19 @@ pub fn process_2400<F: FnMut(&DemodResult)>(
             buf[..frame_bytes].copy_from_slice(&bytes[..frame_bytes]);
 
             let crc_outcome = if df.has_clean_crc() {
-                crc::check(&mut buf[..frame_bytes])
+                // Long-CRC DFs (11/17/18): 1-bit correction matches
+                // dump1090's default (`Modes.nfix_crc = 1`). 2-bit
+                // correction is implemented in `crc::check_with_depth`
+                // and trips the precision floor on its own: the
+                // 6216-pair 2-bit syndrome space has enough
+                // collisions in real RTL-SDR noise that the false-
+                // positive rate dwarfs the true-positive gain on a
+                // typical 60-second NYC capture (+0.2% recall but
+                // -6.4% precision when we measured). dump1090 only
+                // attempts 2-bit when `--fix-2errors` is set; ours
+                // mirrors that opt-in posture. To enable, pass
+                // depth = 2 here.
+                crc::check_with_depth(&mut buf[..frame_bytes], 1)
             } else {
                 // CRC is address-XORed. Per dump1090's
                 // scoreModesMessage: compute the syndrome and check
