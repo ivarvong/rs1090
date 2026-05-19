@@ -96,6 +96,13 @@ pub struct DemodConfig {
     /// `0..preamble_samples`. Pre-built so the per-window scoring loop
     /// (see [`preamble_score`]) doesn't have to filter on the hot path.
     pub preamble_low_idx: Vec<usize>,
+    /// Reserved for a future matched-filter correlator (see commit
+    /// history — a first attempt at a per-sample-fractional-weight
+    /// correlator hurt sensitivity at 2.4 MS/s and was reverted).
+    /// Kept as an exposed field so the precomputation stays in one
+    /// place when the correlator gets a second look.
+    #[allow(dead_code)]
+    pub preamble_weights_q8: Vec<i32>,
 }
 
 impl DemodConfig {
@@ -134,6 +141,46 @@ impl DemodConfig {
         let preamble_low_idx: Vec<usize> = (0..preamble_samples)
             .filter(|i| !high_set.contains(i))
             .collect();
+
+        // Matched-filter weights: for each sample index in the preamble
+        // window, compute what fraction of that sample's footprint
+        // overlaps any of the four pulse windows; weight = (2·frac − 1)
+        // in Q8 fixed-point so the correlator's hot path can multiply
+        // u16 samples by integer weights with no float ops.
+        //
+        // At 2.0 MS/s every sample is either fully inside a pulse or
+        // fully outside, so weights are ±256 (matching the old
+        // high/low index split, just expressed in Q8). At 2.4 MS/s a
+        // pulse spans 1.2 samples so the boundary samples get partial
+        // weights in [−256, +256], which is the gain we need: those
+        // samples are mostly-pulse but not fully, and treating them as
+        // "fully high" overstates the score on weak preambles where
+        // they're indistinguishable from noise.
+        let mut preamble_weights_q8: Vec<i32> = Vec::with_capacity(preamble_samples);
+        for s in 0..preamble_samples {
+            #[allow(clippy::cast_precision_loss)]
+            let s_start = s as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let s_end = (s + 1) as f64;
+            // Sum overlaps of this sample's [s_start, s_end) footprint
+            // with each pulse's [p_us·spb, (p_us + 0.5)·spb) range.
+            let mut pulse_frac = 0.0_f64;
+            for &p_us in &PREAMBLE_PULSE_OFFSETS_US {
+                let p_start = p_us * spb_us;
+                let p_end = (p_us + PULSE_WIDTH_US) * spb_us;
+                let left = s_start.max(p_start);
+                let right = s_end.min(p_end);
+                if right > left {
+                    pulse_frac += right - left;
+                }
+            }
+            // Clamp to [0, 1] for numerical safety.
+            let pulse_frac = pulse_frac.clamp(0.0, 1.0);
+            // Weight = (2·frac − 1) · 256, rounded.
+            #[allow(clippy::cast_possible_truncation)]
+            let w = ((2.0 * pulse_frac - 1.0) * 256.0).round() as i32;
+            preamble_weights_q8.push(w);
+        }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let samples_per_bit = samples_per_bit_f64.round() as usize;
         Self {
@@ -143,6 +190,7 @@ impl DemodConfig {
             preamble_samples,
             preamble_high_idx,
             preamble_low_idx,
+            preamble_weights_q8,
         }
     }
 
@@ -269,6 +317,15 @@ pub fn preamble_score_cfg(cfg: &DemodConfig, window: &[u16]) -> i32 {
         cfg.preamble_samples,
         "preamble window must match cfg.preamble_samples",
     );
+    // Score = sum(high_samples) − sum(low_samples), then normalise by
+    // count so a rate with more high samples (e.g. 8 at 2.4 MS/s vs
+    // 4 at 2 MS/s) doesn't double the apparent score and confuse
+    // [`preamble_clears_threshold`]. Multiplying by 4 (the canonical
+    // 2 MS/s high count) before dividing keeps the threshold tuning
+    // intact across rates. A matched-filter (per-sample-fractional)
+    // version was tried and *hurt* sensitivity at 2.4 MS/s: it
+    // subtracts more energy from pulse-edge samples than the actual
+    // signal supports.
     let mut high: u32 = 0;
     let mut low: u32 = 0;
     for &i in &cfg.preamble_high_idx {
@@ -277,15 +334,6 @@ pub fn preamble_score_cfg(cfg: &DemodConfig, window: &[u16]) -> i32 {
     for &i in &cfg.preamble_low_idx {
         low += u32::from(window[i]);
     }
-    // Normalize so the score's magnitude is comparable across rates:
-    // at 2 MS/s we have 4 high samples vs 12 low; at 2.4 MS/s we have
-    // 8 high vs 11 low. Without normalization the 2.4 score would be
-    // ~2× as large as the 2 MS/s score for the same SNR, throwing off
-    // the [`preamble_clears_threshold`] comparison (which is tuned for
-    // the 4/12 split). Divide each sum by its index count to bring
-    // both back to "average magnitude per high sample" minus
-    // "average magnitude per low sample", multiplied by the canonical
-    // 4-high count so the threshold gain stays the same.
     #[allow(clippy::cast_possible_wrap)]
     let high_count = cfg.preamble_high_idx.len() as i64;
     #[allow(clippy::cast_possible_wrap)]
@@ -412,44 +460,67 @@ pub fn slice_bits_cfg(
     let spb = cfg.samples_per_bit_f64;
     let last_idx = samples.len() - 1;
     for (i, (bit, conf)) in bits.iter_mut().zip(confidences.iter_mut()).enumerate() {
-        // Read each half-bit's magnitude at the *start* of that half,
-        // matching the existing 2 MS/s convention (where the slicer
-        // reads samples[2i] and samples[2i+1] — sample 0 of each
-        // half). At fractional SPB the position falls between integer
-        // samples, so we linearly interpolate the two nearest. This
-        // keeps the 2 MS/s case bit-identical to the old integer-only
-        // path (positions 0 and 1 hit exact integer samples) while
-        // letting 2.4 MS/s read the correct fractional position.
-        let start = i as f64 * spb;
-        let s0 = interp_sample(samples, start, last_idx);
-        let s1 = interp_sample(samples, start + spb * 0.5, last_idx);
-        let (b, c) = slice_bit(s0, s1);
+        // Each half-bit is `spb / 2` input samples wide. To avoid
+        // half-bit-boundary contamination at fractional SPB (2.4 MS/s,
+        // where each half-bit straddles two input samples), integrate
+        // the magnitude over the half-bit window with overlap-weighted
+        // contributions from every input sample the window touches.
+        //
+        // At SPB=2 (integer) the integrand spans exactly one input
+        // sample per half, so the integral degenerates to reading
+        // that single sample — bit-identical to the legacy fast path.
+        let first_start = i as f64 * spb;
+        let mid = first_start + spb * 0.5;
+        let end = first_start + spb;
+        let s0_mag = integrated_magnitude(samples, first_start, mid, last_idx);
+        let s1_mag = integrated_magnitude(samples, mid, end, last_idx);
+        let (b, c) = slice_bit(s0_mag, s1_mag);
         *bit = b;
         *conf = c;
     }
 }
 
-/// Linearly interpolate the magnitude at fractional sample position
-/// `pos` from `samples`. Both at-or-past-end and negative positions
-/// clamp to the corresponding endpoint sample — the bit slicer's call
-/// sites guarantee the bulk of accesses are in-range, but the
-/// clamping handles the last-bit boundary cleanly.
+/// Integrate the magnitude over the half-open input-sample range
+/// `[start, end)` (positions in input-sample units; can be fractional)
+/// and return the average magnitude across the window.
+///
+/// This is the proper fractional-SPB bit-slicer kernel: for each
+/// integer sample that the window overlaps, we contribute
+/// `sample_magnitude × overlap_fraction`, then divide by the total
+/// overlap so the returned `u16` is in the same units as the original
+/// sample magnitudes — directly comparable across the two half-bits
+/// and across bits. The division also makes confidence comparable to
+/// the legacy integer-SPB path.
 #[inline]
-fn interp_sample(samples: &[u16], pos: f64, last_idx: usize) -> u16 {
-    if pos <= 0.0 {
-        return samples[0];
-    }
+fn integrated_magnitude(samples: &[u16], start: f64, end: f64, last_idx: usize) -> u16 {
+    let start = start.max(0.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let i = pos.floor() as usize;
-    if i >= last_idx {
-        return samples[last_idx];
+    let mut i = start.floor() as usize;
+    let mut total: f64 = 0.0;
+    let mut weight_sum: f64 = 0.0;
+    while i <= last_idx {
+        #[allow(clippy::cast_precision_loss)]
+        let left = (i as f64).max(start);
+        #[allow(clippy::cast_precision_loss)]
+        let right = ((i + 1) as f64).min(end);
+        if right <= left {
+            break;
+        }
+        let w = right - left;
+        total += w * f64::from(samples[i]);
+        weight_sum += w;
+        i += 1;
     }
-    let frac = pos - i as f64;
-    let s0 = f64::from(samples[i]);
-    let s1 = f64::from(samples[i + 1]);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let v = (s0 * (1.0 - frac) + s1 * frac).round() as u32;
-    v.min(u32::from(u16::MAX)) as u16
+    if weight_sum <= 0.0 {
+        return 0;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let avg = (total / weight_sum).round() as u32;
+    avg.min(u32::from(u16::MAX)) as u16
 }
 
 /// Slice a run of bits at the canonical 2 MS/s rate. Thin wrapper around
