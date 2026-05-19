@@ -264,6 +264,12 @@ pub struct FrameDetector {
     /// from this on every frame so all the rate-dependent math lives in
     /// one place.
     cfg: DemodConfig,
+    /// Set of ICAO addresses seen on clean DF 11/17/18 demods during
+    /// this session. The 2.4 MS/s demod path consults this on every
+    /// surveillance-reply candidate (DF 0/4/5/16/20/21) to gate against
+    /// noise — see `demod_2400.rs` for the trick. Empty / unused at
+    /// 2 MS/s.
+    icao_filter: crate::demod_2400::IcaoFilter,
     /// Configuration: minimum aggregate confidence for a frame to be
     /// surfaced. Frames below this are dropped silently. `0` means "accept
     /// everything that passes CRC".
@@ -347,6 +353,7 @@ impl FrameDetector {
         let carry = alloc::vec![0u16; carry_capacity];
         Self {
             floor: NoiseFloor::fresh(),
+            icao_filter: crate::demod_2400::IcaoFilter::default(),
             min_confidence: 0,
             carry,
             carry_len: 0,
@@ -398,7 +405,8 @@ impl FrameDetector {
         //      else uses the integer-SPB-friendly generic path below.
         if self.cfg.sample_rate == 2_400_000 {
             let min_conf = self.min_confidence;
-            let consumed = run_2400(&mut self.floor, buf, min_conf, &mut on_frame);
+            let consumed =
+                run_2400(&mut self.floor, &mut self.icao_filter, buf, min_conf, &mut on_frame);
             // 3. Stash trailing window for next call (same shape as the
             //    generic path, but the index we resume from is what the
             //    2400 path consumed up to).
@@ -528,13 +536,14 @@ impl FrameDetector {
 /// the carry-over.
 fn run_2400<F: FnMut(&Frame)>(
     floor: &mut NoiseFloor,
+    icao_filter: &mut crate::demod_2400::IcaoFilter,
     buf: &[u16],
     min_confidence: u8,
     mut on_frame: F,
 ) -> usize {
     use crate::demod_2400;
     let mut last_consumed = 0usize;
-    demod_2400::process_2400(floor, buf, min_confidence, |res| {
+    demod_2400::process_2400(floor, icao_filter, buf, min_confidence, |res| {
         let len = res.df.frame_bytes();
         #[allow(clippy::cast_possible_truncation)]
         let frame = Frame {

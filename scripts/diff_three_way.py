@@ -102,16 +102,29 @@ def run_rs1090(uc8_path: Path, sample_rate: int) -> set[str]:
         ],
         capture_output=True, text=True, check=True,
     )
+    # Apples-to-apples with dump1090's `--raw --no-fix`: it emits
+    #   - Clean-CRC DF 11/17/18 frames (the CRC validates by spec)
+    #   - DF 0/4/5/16/20/21 surveillance replies whose CRC syndrome
+    #     matches a recently-seen ICAO (the dump1090 icaoFilter trick).
+    # rs1090's replay marks the second class as `failed` outwardly
+    # (the CRC truly doesn't validate without the address) but the
+    # hex bytes are exactly what dump1090 ships, so we include them
+    # when the DF is a surveillance reply.
+    address_xor_dfs = {0, 4, 5, 16, 20, 21}
     frames: set[str] = set()
     for line in proc.stdout.splitlines():
         m = RS_RE.match(line)
         if not m:
             continue
-        # Match dump1090/readsb's --no-fix: include only CRC-clean
-        # frames so the comparison is at the same level.
-        if m.group("crc") != "clean":
+        hex_frame = m.group("hex").upper()
+        crc = m.group("crc")
+        if crc == "clean":
+            frames.add(hex_frame)
             continue
-        frames.add(m.group("hex").upper())
+        if crc == "failed":
+            df = int(hex_frame[0:2], 16) >> 3
+            if df in address_xor_dfs:
+                frames.add(hex_frame)
     return frames
 
 

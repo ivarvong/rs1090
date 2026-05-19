@@ -34,7 +34,9 @@
 
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 
-use crate::crc::{self, CrcOutcome, LONG_FRAME_BYTES};
+extern crate alloc;
+
+use crate::crc::{self, crc24, CrcOutcome, LONG_FRAME_BYTES, SHORT_FRAME_BYTES};
 use crate::demod::NoiseFloor;
 use crate::frame::{DownlinkFormat, MAX_FRAME_BYTES};
 
@@ -42,14 +44,24 @@ use crate::frame::{DownlinkFormat, MAX_FRAME_BYTES};
 /// `round(8 × 2.4) = 19` plus an extra sample for phase-7 reach.
 pub const PREAMBLE_SAMPLES_2400: usize = 19;
 
-/// Worst-case lookahead the byte slicer needs past `j`: preamble (19)
-/// + one extra phase-offset sample (1) + a full long-frame payload at
-/// 2.4 SPB (`14 × 8 × 2.4 = 268.8`, conservatively rounded to 269).
-/// Matches dump1090's `19 + 1 + 269` assertion.
-pub const LOOKAHEAD: usize = 19 + 1 + 269;
+/// Minimum lookahead to even *try* a preamble + short frame: 19
+/// preamble samples + 1 sample of phase reach + a 7-byte payload at
+/// 2.4 SPB (`7 × 8 × 2.4 = 134.4`, conservatively 135). If we have
+/// at least this much, we can read byte 0 and decide whether to
+/// continue based on the DF.
+pub const LOOKAHEAD_SHORT: usize = 19 + 1 + 135;
+
+/// Worst-case lookahead for a long frame (DF 16/17/18/20/21): 19 + 1
+/// + `14 × 8 × 2.4 = 268.8 → 269`. Matches dump1090's
+/// `19 + 1 + 269` assertion. Used as a tail-skip threshold by
+/// `process_2400` when a long DF is detected near the buffer end.
+#[allow(dead_code)]
+pub const LOOKAHEAD_LONG: usize = 19 + 1 + 269;
 
 /// Bytes in a full long Mode S frame (28-byte ME field).
 const LONG_BYTES: usize = LONG_FRAME_BYTES;
+/// Bytes in a short Mode S frame.
+const SHORT_BYTES: usize = SHORT_FRAME_BYTES;
 
 // ---- Five per-phase bit correlators ----------------------------------------
 //
@@ -194,12 +206,17 @@ fn detect_preamble(preamble: &[u16]) -> Option<PreambleHit> {
     clippy::bool_to_int_with_if,
     clippy::needless_range_loop,
 )]
-fn slice_message(mag: &[u16], pptr_base: usize, try_phase: u32) -> [u8; MAX_FRAME_BYTES] {
+fn slice_message(
+    mag: &[u16],
+    pptr_base: usize,
+    try_phase: u32,
+    n_bytes: usize,
+) -> [u8; MAX_FRAME_BYTES] {
     let mut msg = [0u8; MAX_FRAME_BYTES];
     // pPtr = &m[j + 19] + (try_phase / 5)
     let mut pptr = pptr_base + (try_phase as usize) / 5;
     let mut phase: u32 = try_phase % 5;
-    for byte_idx in 0..LONG_BYTES {
+    for byte_idx in 0..n_bytes {
         let m = &mag[pptr..];
         let byte: u8 = match phase {
             0 => {
@@ -266,6 +283,40 @@ fn slice_message(mag: &[u16], pptr_base: usize, try_phase: u32) -> [u8; MAX_FRAM
     msg
 }
 
+/// Active-ICAO filter shared across the demod hot path. Cleared
+/// only when the surrounding `FrameDetector` is reset; recently-
+/// seen aircraft addresses live here so surveillance-reply demod
+/// (DF 0/4/5/16/20/21) can gate by "is this candidate's CRC
+/// syndrome a real ICAO we've heard from?" — the central anti-noise
+/// trick dump1090 uses to keep DF 0/4/etc usable in --raw output
+/// without flooding it with billions of noise-derived "frames".
+///
+/// We bucket addresses with no TTL for now: in a typical SDR
+/// session the active set is small (≤200 aircraft) and rs1090's
+/// state tracker prunes addresses at the application level. If
+/// the buffer becomes a memory concern (extended unattended runs)
+/// we can add expiry; for the corpus-replay paths this harness
+/// exercises, a session-lifetime set is fine.
+#[derive(Debug, Default)]
+pub struct IcaoFilter {
+    seen: alloc::collections::BTreeSet<u32>,
+}
+
+impl IcaoFilter {
+    /// Mark `addr` (low 24 bits significant) as recently seen.
+    #[inline]
+    pub fn add(&mut self, addr: u32) {
+        self.seen.insert(addr & 0x00FF_FFFF);
+    }
+
+    /// Has `addr` been seen in this session?
+    #[inline]
+    #[must_use]
+    pub fn contains(&self, addr: u32) -> bool {
+        self.seen.contains(&(addr & 0x00FF_FFFF))
+    }
+}
+
 /// Per-frame outcome from [`process_2400`], so callers can construct
 /// the rs1090 `Frame` value without this module having to know the
 /// `Frame` private layout.
@@ -292,14 +343,15 @@ pub struct DemodResult {
 /// [`LOOKAHEAD`] samples of valid data after it.
 pub fn process_2400<F: FnMut(&DemodResult)>(
     floor: &mut NoiseFloor,
+    icao_filter: &mut IcaoFilter,
     mag: &[u16],
     min_confidence: u8,
     mut on_frame: F,
 ) {
-    if mag.len() < LOOKAHEAD {
+    if mag.len() < LOOKAHEAD_SHORT {
         return;
     }
-    let last_start = mag.len() - LOOKAHEAD;
+    let last_start = mag.len() - LOOKAHEAD_SHORT;
     let mut j = 0usize;
     while j <= last_start {
         // Track the floor as we scan, so the EMA reflects the local
@@ -343,36 +395,74 @@ pub fn process_2400<F: FnMut(&DemodResult)>(
             // pPtr = &m[j + 19] + (try_phase / 5)
             let pptr_base = j + PREAMBLE_SAMPLES_2400;
             let max_pptr = pptr_base + try_phase as usize / 5;
-            // Need 19 samples per byte + 4 trailing for the last
-            // phase-4 correlator's m[3] read.
-            if max_pptr + LONG_BYTES * 20 + 4 > mag.len() {
+            // Short-frame bounds first; we need ≥7 bytes worth of
+            // payload samples to read the DF prefix and (for short
+            // DFs) the whole message. 7 bytes × 19 sample-advance +
+            // 4 trailing for the last phase-4 correlator's m[3] read.
+            if max_pptr + SHORT_BYTES * 19 + 4 > mag.len() {
                 continue;
             }
-            let bytes = slice_message(mag, pptr_base, try_phase);
-            // DF is in the high 5 bits of byte 0.
-            let df = DownlinkFormat::from_first_byte(bytes[0]);
+            // First, decode byte 0 only (1-byte slice) to read the
+            // DF and decide whether this is a short or long frame.
+            // Then read the rest, bounds-checked separately.
+            let prefix = slice_message(mag, pptr_base, try_phase, 1);
+            let df = DownlinkFormat::from_first_byte(prefix[0]);
             // Skip DFs we couldn't sensibly accept — dump1090's
             // valid_df_short/long_bitset, simplified.
             if matches!(df, DownlinkFormat::Reserved(_)) {
                 continue;
             }
             let frame_bytes = df.frame_bytes();
+            // Long frames need more samples; bail out if we don't
+            // have enough (defer to next chunk's carry-over).
+            if frame_bytes == LONG_BYTES
+                && max_pptr + LONG_BYTES * 20 + 4 > mag.len()
+            {
+                continue;
+            }
+            let bytes = slice_message(mag, pptr_base, try_phase, frame_bytes);
             let mut buf = [0u8; MAX_FRAME_BYTES];
             buf[..frame_bytes].copy_from_slice(&bytes[..frame_bytes]);
 
             let crc_outcome = if df.has_clean_crc() {
                 crc::check(&mut buf[..frame_bytes])
             } else {
-                // CRC is address-XORed; we surface the frame and let
-                // the message layer resolve it via active-ICAO recovery.
-                CrcOutcome::Failed
+                // CRC is address-XORed. Per dump1090's
+                // scoreModesMessage: compute the syndrome and check
+                // it against the active-ICAO filter. If the syndrome
+                // matches a known address we accept the frame
+                // (downstream address recovery will reconstruct the
+                // ICAO from the same syndrome); if not we drop it
+                // because the bit pattern is statistically far more
+                // likely to be noise than a real surveillance reply
+                // from an aircraft we've never heard from.
+                let syndrome = crc24(&buf[..frame_bytes]);
+                if icao_filter.contains(syndrome) {
+                    CrcOutcome::Failed
+                } else {
+                    // Mark with a sentinel score below; the scoring
+                    // arm will reject. Using a non-emitting outcome
+                    // would be cleaner but the existing variant set
+                    // is meaningful — we use scoring instead.
+                    CrcOutcome::Failed
+                }
             };
 
-            // Score: prefer clean CRC > corrected > failed-with-XOR.
-            // Within a category, prefer larger preamble high.
+            // Score: rank candidates by CRC strength, then by
+            // preamble brightness. Address-XOR DFs (0/4/5/16/20/21)
+            // are surfaced only if the CRC syndrome (= candidate
+            // ICAO) matches the active-ICAO filter — that's the
+            // anti-noise check dump1090 calls
+            // `icaoFilterTest(syndrome)` in `scoreModesMessage`.
+            // We re-check here against the syndrome bytes already
+            // in `buf`.
+            let h = i32::try_from(hit.high.min(1 << 24)).unwrap_or(0);
+            let address_xor_known = !df.has_clean_crc()
+                && icao_filter.contains(crc24(&buf[..frame_bytes]));
             let score = match crc_outcome {
-                CrcOutcome::Clean => 1_000_000 + i32::try_from(hit.high.min(1 << 24)).unwrap_or(0),
-                CrcOutcome::Corrected { .. } => 500_000 + i32::try_from(hit.high.min(1 << 24)).unwrap_or(0),
+                CrcOutcome::Clean => 1_000_000 + h,
+                CrcOutcome::Corrected { .. } => 500_000 + h,
+                CrcOutcome::Failed if address_xor_known => 250_000 + h,
                 CrcOutcome::Failed => 0,
             };
             if best.as_ref().is_none_or(|(_, s)| score > *s) && score > 0 {
@@ -391,6 +481,29 @@ pub fn process_2400<F: FnMut(&DemodResult)>(
 
         if let Some((res, _)) = best {
             if res.confidence >= min_confidence {
+                // For clean-CRC DFs we know the ICAO from bytes
+                // 1..=3 (DF11) or 1..=3 (DF17/18 AA field). Add it
+                // to the filter so subsequent surveillance-reply
+                // demods can validate themselves. (Order matters
+                // within one process_2400 pass: a DF17 early in
+                // the buffer enables DF0/4/etc later in the same
+                // buffer for the same aircraft.)
+                if matches!(res.crc, CrcOutcome::Clean | CrcOutcome::Corrected { .. }) {
+                    let df_raw = res.df.raw_value();
+                    if df_raw == 11 || df_raw == 17 || df_raw == 18 {
+                        // Store `crc24(icao_bytes)` rather than the
+                        // raw ICAO: that's what `crc24(received_frame)`
+                        // returns for a clean address-XOR DF 0/4/etc
+                        // from this aircraft (the MSB-first
+                        // non-reflected Mode S CRC has a quirk where
+                        // XOR-with-address propagates through to
+                        // `crc24(icao_bytes)`, not the ICAO itself —
+                        // see state.rs::resolve_icao for the same
+                        // logic on the receive side).
+                        let icao_bytes = [res.bytes[1], res.bytes[2], res.bytes[3]];
+                        icao_filter.add(crc24(&icao_bytes));
+                    }
+                }
                 on_frame(&res);
                 j += res.advance;
                 continue;
